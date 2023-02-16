@@ -1,0 +1,14 @@
+{"n_mels": 395,
+ "f_min": 25.956543,
+ "f_max": 8000,
+ "n_fft": 4096,
+ "win_fw": 4,
+ "seq_len": 160000,
+ "batch_size": 12,
+ "lr": 0.001,
+ "cnn_unit": 48,
+ "lstm_unit": 48,
+ "hidden_per_pitch": 48,
+ "transform": True,
+ "model": 'PAR'
+}
