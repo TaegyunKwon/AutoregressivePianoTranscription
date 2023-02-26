@@ -39,8 +39,9 @@ def remove_progress(captured_out):
     return '\n'.join(lines)
 
 default_dict = dict(
-    n_mels=395,
-    f_min=25.956543,
+    n_mels=700,
+    n_fft=4096,
+    f_min=27.5,
     f_max=8000,
     cnn_unit=48,
     lstm_unit=48,
@@ -48,6 +49,7 @@ default_dict = dict(
     fc_unit=768,
     batch_size=12,
     win_fw=4,
+    win_bw=0,
     model='PAR',
     dataset='MAESTRO_V3',
     seq_len=160256,
@@ -58,7 +60,9 @@ default_dict = dict(
     valid_interval=10000,
     debug=False,
     seed=1000,
-    resume_id=None
+    resume_id=None,
+    iteration=250000
+    
     )
    
    
@@ -109,7 +113,7 @@ class ModelSaver():
             lastest = np.argmax([int(el[0].split('_')[1]) for el in self.top_n])
             self.last_ckp = self.top_n[lastest][0]
             self.last_step = int(self.last_ckp.split('_')[0])
-            self.last_opt = f'opt_{self.last_step//1000}k.pt'
+            self.last_opt = self.save_name_opt(self.last_step)
 
     def save_model(self, model, save_name):
         save_dict = self.config.__dict__
@@ -118,15 +122,24 @@ class ModelSaver():
         self.last_ckp = save_name
 
     def update_optim(self, optimizer, step):
-        opt_name = f'opt_{step//1000}k.pt'
+        opt_name = self.save_name_opt(step)
         th.save(optimizer.state_dict(), self.logdir / opt_name)
-        last_opt = self.logdir / f'opt_{self.last_step//1000}k.pt'
+        last_opt = self.logdir / self.save_name_opt(self.last_step)
         if last_opt.exists():
             last_opt.unlink()
         self.last_opt = opt_name
+
+    def save_name_opt(self, step):
+        if step > 1000:
+            return f'opt_{step//1000}k.pt'
+        else:
+            return f'opt_{step}k.pt'
     
-    def save_name(step, score):
-        return f'model_{step//1000}k_{score:.4f}.pt'
+    def save_name(self, step, score):
+        if step > 1000:
+            return f'model_{step//1000}k_{score:.4f}.pt'
+        else:
+            return f'model_{step}k_{score:.4f}.pt'
     
     def write_csv(self):
         with open(self.logdir / 'checkpoint.csv', "w") as f:
@@ -157,24 +170,24 @@ class ModelSaver():
 
 class Losses(nn.Module):
     def __init__(self):
-        super.__init__()
+        super().__init__()
         self.frame_loss_fn = FocalLoss(alpha=1.0, gamma=2.0) # In: B x C x *
         self.vel_loss_fn = nn.MSELoss() # In: B x *
 
     def forward(self, logit, vel, label, vel_label):
         frame_loss = self.frame_loss_fn(logit.permute(0, 3, 1, 2), label).mean()
         onset_mask = ((label == 2) + (label == 4))>0
-        vel_loss = self.vel_loss_fn(vel, th.true_divide(vel_label, 128), onset_mask).mean()
+        vel_loss = self.vel_loss_fn(vel*onset_mask, th.true_divide(vel_label, 128)*onset_mask).mean()
 
         return frame_loss, vel_loss
     
 
-def train_step(model, batch, loss_fn, optimizer, scheduler, device, rank, step):
+def train_step(model, batch, loss_fn, optimizer, scheduler, device, rank, step, config, run):
     for param in model.parameters():
         param.grad = None
     audio = batch['audio'].to(device)
-    shifted_label = batch['shifted_label'].to(device)
-    shifted_vel = batch['shifted_vel'].to(device)
+    shifted_label = batch['label'].to(device)
+    shifted_vel = batch['velocity'].to(device)
     last_onset_time = batch['last_onset_time'].to(device)
     last_onset_vel = batch['last_onset_vel'].to(device)
     frame_out, vel_out = model(audio, shifted_label[:, :-1], 
@@ -190,12 +203,12 @@ def train_step(model, batch, loss_fn, optimizer, scheduler, device, rank, step):
     optimizer.step()
     scheduler.step()
     if rank == 0:
-        run.log(dict(loss=loss, vel_loss=loss), step=step)
+        run.log({"train": dict(loss=loss, vel_loss=vel_loss)}, step=step)
     
-def valid_step(model, batch, loss_fn, device):
+def valid_step(model, batch, loss_fn, device, config):
     audio = batch['audio'].to(device)
-    shifted_label = batch['shifted_label'].to(device)
-    shifted_vel = batch['shifted_vel'].to(device)
+    shifted_label = batch['label'].to(device)
+    shifted_vel = batch['velocity'].to(device)
     last_onset_time = batch['last_onset_time'].to(device)
     last_onset_vel = batch['last_onset_vel'].to(device)
     frame_out, vel_out = model(audio, shifted_label[:, :-1], 
@@ -206,24 +219,28 @@ def valid_step(model, batch, loss_fn, device):
     validation_metric = defaultdict(list)
     for n in range(audio.shape[0]):
         sample = frame_out[n].argmax(dim=-1)
-        metrics = evaluate(sample, shifted_label[n])
-        for k, v in metrics:
+        metrics = evaluate(sample, shifted_label[n][1:])
+        for k, v in metrics.items():
             validation_metric[k].append(v)
     validation_metric['loss'] = loss
     validation_metric['vel_loss'] = vel_loss
     
     return validation_metric
 
-def train(rank, world_size, run, config):
-    setup(rank, world_size)
+def train(rank, world_size, run, config, ddp=True):
+    if ddp:
+        setup(rank, world_size)
+    else:
+        assert world_size == 1 and rank == 0
     device = f'cuda:{rank}'
     seed = config.seed + rank
     th.manual_seed(seed)
     np.random.seed(seed)
 
-    # model = ARModel(config).to(rank)
-    model = ToyModel().to(rank)
-    model = DDP(model, device_ids=[rank])
+    model = ARModel(config).to(rank)
+    # model = ToyModel().to(rank)
+    if ddp:
+        model = DDP(model, device_ids=[rank])
     optimizer = AdaBelief(model.parameters(), lr=config.lr, 
                           eps=1e-16, betas=(0.9,0.999), weight_decouple=True, 
                           rectify = False)
@@ -246,21 +263,25 @@ def train(rank, world_size, run, config):
     scheduler = StepLR(optimizer, step_size=5000, gamma=0.95)
     train_set = get_dataset(config, ['train'], random_sample=True)
     valid_set = get_dataset(config, ['validation'], random_sample=False)
-    train_sampler = DistributedSampler(dataset=train_set, num_replicas=world_size, 
-                                       rank=rank, shuffle=True)
-    valid_sampler = DistributedSampler(dataset=valid_set, num_replicas=world_size, 
+    if ddp:
+        train_sampler = DistributedSampler(dataset=train_set, num_replicas=world_size, 
+                                        rank=rank, shuffle=True)
+        valid_sampler = DistributedSampler(dataset=valid_set, num_replicas=world_size, 
                                        shuffle=False)
+    else:
+        train_sampler=None
+        valid_sampler=None
     data_loader_train = DataLoader(
         train_set, sampler=train_sampler,
-        batch_size=config.batch_size,
-        num_workers=config.num_workers,
+        batch_size=config.batch_size//world_size,
+        num_workers=config.n_workers,
         pin_memory=False,
         drop_last=True,
     )
     data_loader_valid = DataLoader(
         valid_set, sampler=valid_sampler,
-        batch_size=config.batch_size,
-        num_workers=config.num_workers,
+        batch_size=config.batch_size//world_size,
+        num_workers=config.n_workers,
         pin_memory=False,
         drop_last=False,
     )
@@ -268,36 +289,50 @@ def train(rank, world_size, run, config):
     loss_fn = Losses()
 
     for epoch in range(10000):
-        data_loader_train.sampler.set_epoch(epoch)
+        if ddp:
+            data_loader_train.sampler.set_epoch(epoch)
         for batch in data_loader_train:
             step += 1
-            train_step(model, batch, loss_fn, optimizer, scheduler, device, rank, step)
+            train_step(model, batch, loss_fn, optimizer, scheduler, device, rank, step, config, run)
 
             if step % config.valid_interval == 0:
                 model.eval()
 
                 validation_metric = defaultdict(list)
                 for batch in data_loader_valid:
-                    data_loader_train.sampler.set_epoch(epoch)
                     with th.no_grad():
-                        batch_metric = valid_step(model, batch, loss_fn, device)
+                        batch_metric = valid_step(model, batch, loss_fn, device, config)
                         for k, v in batch_metric.items():
                             validation_metric[k].append(v)
                 valid_rank_mean = defaultdict(list)
                 for k,v in validation_metric.items():
-                    valid_rank_mean[k] = np.mean(v)
-                metric_gather = [None for _ in range(world_size)]
-                dist.gather_object(validation_metric, metric_gather if rank==0 else None, dst=0)
+                    if 'loss' in k:
+                        valid_rank_mean[k] = th.mean(th.stack(v))
+                    else:
+                        valid_rank_mean[k] = np.mean(v)
+                if ddp:
+                    metric_gather = [None for _ in range(world_size)]
+                    dist.gather_object(validation_metric, metric_gather if rank==0 else None, dst=0)
+                    if rank == 0:
+                        valid_mean = defaultdict(list)
+                        for k,v in valid_rank_mean.items():
+                            valid_mean[k] = np.mean([el[k] for el in metric_gather])
+                else:
+                    valid_mean = valid_rank_mean
+                
+                model.train()
                 if rank == 0:
-                    valid_mean = defaultdict(list)
-                    for k,v in valid_rank_mean.items():
-                        valid_mean[k] = np.mean([el[k] for el in metric_gather])
-                    run.log(valid_mean, step=step, set='validation')
+                    run.log({'valid':valid_mean}, step=step)
+                    for key, value in valid_mean.items():
+                        if key[-2:] == 'f1' or 'loss' in key or key[-3:] == 'err':
+                            print(f'{key} : {np.mean(value)}')
                     model_saver.update(model, optimizer, step, valid_mean['loss'])
-                dist.barrier()
+                if ddp:
+                    dist.barrier()
             if step >= config.iteration:
                 wandb.finish()
-                cleanup()
+                if ddp:
+                    cleanup()
         
     
     
@@ -318,22 +353,36 @@ if __name__ == '__main__':
     parser.add_argument('-l', '--lstm_unit', type=int, default=48)
     parser.add_argument('-p', '--hidden_per_pitch', type=int, default=48)
     parser.add_argument('-t', '--tag', type=str)
+    parser.add_argument('-d', '--debug', action='store_true')
     parser.add_argument('--resume_id', type=str)
+    parser.add_argument('--ddp', action='store_true')
+    parser.add_argument('--no-ddp', dest='ddp', action='store_false')
+    parser.set_defaults(ddp=True)
     
     args = parser.parse_args()
-    
     config = default_dict
     if args.config:
         update_config = json.loads(args.config)
         config.update(update_config)
+    config.update(vars(args))
     config = SimpleNamespace(**config)
+    if config.debug:
+        config.valid_interval=10
+        config.iteration=100
+    print(config)
+
+    dataset = get_dataset(config, ['train', 'validation', 'test'], random_sample=False)
+    dataset.initialize()
 
     if args.resume_id:
         run = wandb.init('transcription', id=args.resume_id, resume="must")
     else:   
         run = wandb.init('transcription', config=config, tags=args.tag)
     
-    n_gpus = th.cuda.device_count()
-    assert n_gpus >= 2, f"Requires at least 2 GPUs to run, but got {n_gpus}"
-    world_size = n_gpus
-    run_demo(train, world_size, run, config)
+    if args.ddp:    
+        n_gpus = th.cuda.device_count()
+        assert n_gpus >= 2, f"Requires at least 2 GPUs to run, but got {n_gpus}"
+        world_size = n_gpus
+        run_demo(train, world_size, run, config)
+    else:
+        train(rank=0, world_size=1, run=run, config=config, ddp=False)

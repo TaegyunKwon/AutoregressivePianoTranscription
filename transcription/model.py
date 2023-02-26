@@ -2,8 +2,9 @@ import torch as th
 from torch import nn
 from torch.nn import functional as F
 import nnAudio
+from torchaudio import transforms
 
-from .cqt import CQT
+# from .cqt import CQT
 from .constants import SR, HOP
 from .context import random_modification, update_context
 
@@ -13,16 +14,24 @@ class ARModel(nn.Module):
         self.model = config.model
         self.win_fw = config.win_fw
         self.win_bw = config.win_bw
+        self.n_fft = config.n_fft
         self.hidden_per_pitch = config.hidden_per_pitch
         self.context_len = self.win_fw + self.win_bw + 1
 
-        self.cqt = CQT(21, 8000, 4, 1, perceptual_w)
+
+        # self.cqt = CQT(21, 8000, 4, 1, perceptual_w)
+        self.melspectrogram = transforms.MelSpectrogram(sample_rate=SR, n_fft=config.n_fft,
+            hop_length=HOP, f_min=config.f_min, f_max=config.f_max, n_mels=config.n_mels, normalized=False)
 
         if self.model == 'PAR':
-            self.acoustic = PAR(config.cnn_unit, config.fc_unit, 
-                                config.hidden_per_pitch, config.win_fw, config.win_bw)
+            self.acoustic = SimpleConv2(config.n_mels, config.cnn_unit, config.fc_unit, 
+                                config.win_fw, config.win_bw, config.hidden_per_pitch)
+            self.vel_acoustic = SimpleConv2(config.n_mels, config.cnn_unit, config.fc_unit, 
+                                config.win_fw, config.win_bw, config.hidden_per_pitch)
         elif self.model == 'PC':
             self.acoustic = PC(config.cnn_unit, config.fc_unit, config.hidden_per_pitch, 
+                               config.win_fw, config.win_bw)
+            self.vel_acoustic = PC(config.cnn_unit, config.fc_unit, config.hidden_per_pitch, 
                                config.win_fw, config.win_bw)
             
         self.context_net = ContextNet(config.hidden_per_pitch, out_dim=4)
@@ -53,7 +62,7 @@ class ARModel(nn.Module):
             self.lstm.flatten_parameters()
             lstm_out, lstm_hidden = self.lstm(concat) # hidden_per_pitch
             frame_out = self.output(lstm_out) # n_frame, B*88 x n_class
-            frame_out = frame_out.view(n_frame, batch_size, 88, self.n_class).permute(1, 0, 2, 3) # B x n_frame x 88 x n_class
+            frame_out = frame_out.view(n_frame, batch_size, 88, 5).permute(1, 0, 2, 3) # B x n_frame x 88 x n_class
 
             vel_concat = th.cat((context_enc, conv_out.detach(), vel_conv_out), dim=2).\
                 permute(1, 0, 3, 2).\
@@ -72,10 +81,9 @@ class ARModel(nn.Module):
             batch_size = audio.shape[0]
             audio_len = audio.shape[1]
             step_len = (audio_len - 1) // HOP+ 1
-            kernel_len = self.cqt.kernel_len
  
             n_segs = ((step_len - 1)//max_step + 1)
-            if 0 <= audio_len - (n_segs-1)*max_step* HOP< kernel_len//2: # padding size of cqt
+            if 0 <= audio_len - (n_segs-1)*max_step* HOP< self.n_fft//2: # padding size of cqt
                 n_segs -= 1
             seg_edges = [el*max_step for el in range(n_segs)]
 
@@ -91,7 +99,7 @@ class ARModel(nn.Module):
                 last_state.view(batch_size, 1, 88).to(audio.device),
                 init_onset_time.view(batch_size, 1, 88, 1).to(audio.device),
                 init_onset_vel.view(batch_size, 1, 88, 1).to(audio.device))
-            frame = th.zeros((batch_size, step_len, 88, self.n_class)).to(audio.device)
+            frame = th.zeros((batch_size, step_len, 88, 5)).to(audio.device)
             vel = th.zeros((batch_size, step_len, 88)).to(audio.device)
 
             c = context_enc.squeeze(1)
@@ -103,16 +111,16 @@ class ARModel(nn.Module):
                     offset = step
                     if step == 0:
                         conv_out, vel_conv_out = self.local_forward(
-                            audio[:, : (offset + max_step) * HOP + kernel_len//2],
+                            audio[:, : (offset + max_step) * HOP + self.n_fft//2],
                             unpad_end=True)
                     elif step == seg_edges[-1]:  # last segment
                         conv_out, vel_conv_out = self.local_forward(
-                            audio[:, offset * HOP - kernel_len//2 : ],
+                            audio[:, offset * HOP - self.n_fft//2 : ],
                             unpad_start=True)
                     else:
                         conv_out, vel_conv_out = self.local_forward(
-                            audio[:, offset * HOP - kernel_len//2: 
-                                (offset + max_step) * HOP + kernel_len//2],
+                            audio[:, offset * HOP - self.n_fft//2: 
+                                (offset + max_step) * HOP + self.n_fft//2],
                             unpad_start=True, unpad_end=True)
 
                 frame_out, vel_out, h, vel_h = self.recurrent_step(
@@ -140,9 +148,15 @@ class ARModel(nn.Module):
             return frame, vel
 
     def local_forward(self, audio, unpad_start=False, unpad_end=False):
-        cqt = self.cqt(audio, unpad_start, unpad_end)
-        conv_out = self.ac_model(cqt)  # B x T x hidden_per_pitch x 88
-        vel_conv_out = self.vel_model(cqt) # B x T x hidden_per_pitch x 88
+        mel = self.melspectrogram(
+            audio[:, :-1]).transpose(-1, -2) # B L F
+        mel = (th.log(th.clamp(mel, min=1e-9)) + 7) / 7
+        if unpad_start:
+            mel = mel[:,self.n_fft//2//HOP:]
+        if unpad_end:
+            mel = mel[:,:-self.n_fft//2//HOP]
+        conv_out = self.acoustic(mel)  # B x T x hidden_per_pitch x 88
+        vel_conv_out = self.vel_acoustic(mel) # B x T x hidden_per_pitch x 88
 
         return conv_out, vel_conv_out
 
@@ -158,7 +172,7 @@ class ARModel(nn.Module):
         self.lstm.flatten_parameters()
         lstm_out, lstm_hidden = self.lstm(concat, h) # hidden_per_pitch
         frame_out = self.output(lstm_out) # n_frame, B*88 x n_class
-        frame_out = frame_out.view(n_frame, batch_size, 88, self.n_class).permute(1, 0, 2, 3) # B x n_frame x 88 x n_class
+        frame_out = frame_out.view(n_frame, batch_size, 88, 5).permute(1, 0, 2, 3) # B x n_frame x 88 x n_class
 
         vel_concat = th.cat((c, z, vel_z), dim=2).\
                         permute(1, 0, 3, 2).\
@@ -204,7 +218,8 @@ class ContextNet(nn.Module):
 
 class FilmLayer(nn.Module):
     def __init__(self, n_f, hidden=16):
-        pitch = (th.range(1, n_f)/n_f).view(1, n_f, 1)
+        super().__init__()
+        pitch = (th.arange(n_f)/n_f).view(n_f, 1)
         self.register_buffer('pitch', pitch.float())
         self.alpha_linear = nn.Sequential(
             nn.Linear(1, hidden),
@@ -213,7 +228,7 @@ class FilmLayer(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden, hidden),
             nn.ReLU(),
-            nn.Linear(hidden, n_f),
+            nn.Linear(hidden, 1),
         )
         self.beta_linear = nn.Sequential(
             nn.Linear(1, hidden),
@@ -222,13 +237,13 @@ class FilmLayer(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden, hidden),
             nn.ReLU(),
-            nn.Linear(hidden, n_f),
+            nn.Linear(hidden, 1),
         )
 
     def forward(self, x):
         # x : shape of (***, F)
-        alpha = self.alpha_linear(self.pitch)
-        beta = self.beta_linear(self.pitch)
+        alpha = self.alpha_linear(self.pitch).squeeze()
+        beta = self.beta_linear(self.pitch).squeeze()
 
         return alpha * x + beta
 
@@ -236,10 +251,6 @@ class FilmLayer(nn.Module):
 class FilmBlock(nn.Module):
     def __init__(self, n_input, n_unit, n_f, hidden=16):
         super().__init__()
-
-        pitch = (th.range(1, n_f)/n_f).view(1, n_f, 1)
-        self.register_buffer('pitch', pitch.float())
-
         self.conv1 = nn.Conv2d(n_input, n_unit, (3, 3), padding=1)
         self.conv2 = nn.Conv2d(n_unit, n_unit, (3, 3), padding=1)
         self.bn = nn.BatchNorm2d(n_unit)
@@ -250,7 +261,7 @@ class FilmBlock(nn.Module):
         x = F.relu(self.conv1(x))
         res = self.conv2(x)
         res = self.bn(res) 
-        res = self.film(res.transpose(2,3)).tranpose(2,3)
+        res = self.film(res.transpose(2,3)).transpose(2,3)
         x = F.relu(x + res)
         return x
 
@@ -318,6 +329,50 @@ class PAR(nn.Module):
         return F.relu(x)
 
 
+class SimpleConv2(nn.Module):
+    # SimpleConv without Pitchwise Conv
+    def __init__(self, n_mels, cnn_unit, fc_unit, win_fw, win_bw, hidden_per_pitch):
+        super().__init__()
+
+        self.win_fw = win_fw
+        self.win_bw = win_bw
+        self.hidden_per_pitch = hidden_per_pitch
+        # input is batch_size * 1 channel * frames * 700
+        self.cnn = nn.Sequential(
+            FilmBlock(1, cnn_unit, n_mels),
+            nn.MaxPool2d((2, 1)),
+            nn.Dropout(0.25),
+            FilmBlock(cnn_unit, cnn_unit, n_mels//2),
+            nn.MaxPool2d((2, 1)),
+            FilmBlock(cnn_unit, cnn_unit, n_mels//4),
+            nn.Dropout(0.25),
+        )
+
+        self.fc = nn.Sequential(
+            nn.Linear((cnn_unit) * (n_mels // 4), fc_unit),
+            nn.Dropout(0.25),
+            nn.ReLU()
+        )
+
+        self.win_fc = nn.Linear(fc_unit*(win_fw+win_bw+1), hidden_per_pitch*88)
+        self.layernorm = nn.LayerNorm([hidden_per_pitch, 88])
+
+    def forward(self, mel):
+        batch_size = mel.shape[0]
+        x = mel.unsqueeze(1)  # B 1 L F
+        x = x.transpose(2,3)  # B 1 F L
+        x = self.cnn(x)  # B C F L
+        fc_x = self.fc(x.permute(0, 3, 1, 2).flatten(-2)) # B L C
+        fc_x = fc_x.transpose(1,2)  # B C L
+        fc_x = F.pad(fc_x, (self.win_bw, self.win_fw)).unsqueeze(3)
+        fc_x = F.unfold(fc_x, (self.win_bw + self.win_fw + 1, 1)) 
+        fc_x = self.win_fc(fc_x.transpose(1,2))  # B L C
+        fc_x = fc_x.view(batch_size, -1, self.hidden_per_pitch, 88)
+
+        x = self.layernorm(fc_x)
+        return F.relu(x)
+    
+    
 class PC(nn.Module):
     def __init__(self):
         raise NotImplementedError

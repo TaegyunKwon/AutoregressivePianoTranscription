@@ -1,20 +1,23 @@
 import numpy as np
 import torch as th
+from torch.nn import functional as F
 
 from .representation import convert2onsets_and_frames
 
 
 def random_modification(tensor, change_prob, reonset_prob=0.03, onset_prob=0.05, offset_prob=0.05, sustain_prob=0.4, off_prob=0.47):
+    # TODO: fix
     mask = (tensor > 0)
     mask_near = (F.pad(mask[:, 3:], (0,0,0,3)) + F.pad(mask[:,:-3], (0,0,3,0)))>0
+    idx = th.nonzero(mask_near, as_tuple=True)
+    n_change = int(len(idx[0])*change_prob)
+    idx = [el[:n_change] for el in idx]
+
     rand_arr = th.multinomial(
-        [off_prob, onset_prob, offset_prob, sustain_prob, reonset_prob], 
-        tensor.shape, replacement=True).to(tensor.device)
-    
-    prob_arr = th.rand(*tensor.shape).to(tensor.device)
-    indicator = (prob_arr < change_prob)*mask_near
-    transformed = ~indicator * tensor + indicator*rand_arr
-    return transformed
+        th.tensor([off_prob, onset_prob, offset_prob, sustain_prob, reonset_prob]), 
+        n_change, replacement=True).to(tensor.device)
+    tensor[idx] = rand_arr
+    return tensor
 
 def update_context(last_onset_time, last_onset_vel, frame, vel, rep_type='base'):
     #  last_onset_time : 88

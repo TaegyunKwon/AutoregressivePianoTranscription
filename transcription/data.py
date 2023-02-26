@@ -8,6 +8,7 @@ from pathlib import Path
 import json
 import csv
 import numpy as np
+import math
 import torch as th
 import torch.nn.functional as F
 from torch.utils.data import Dataset
@@ -50,7 +51,7 @@ class PianoSampleDataset(Dataset):
         if self.sample_length is not None:
             assert sample_length % HOP == 0
         self.delay = delay
-        self.seed = np.random.RandomState(seed)
+        self.random = np.random.RandomState(seed)
         self.transform = transform
 
         self.data_path = []
@@ -67,11 +68,13 @@ class PianoSampleDataset(Dataset):
             for input_pair in self.file_list[group]:
                 self.data_path.append(input_pair)
 
+        '''
         self.data = []
         print('Loading %d group%s of %s at %s' % (len(groups), 's'[:len(groups) - 1], self.__class__.__name__, path))
         for group in groups:
             for input_files in tqdm(self.file_list[group], desc='Loading group %s' % group, ncols=100):
                 self.data.append(self.load(*input_files))
+        '''
                 
 
     def __getitem__(self, index):
@@ -85,8 +88,10 @@ class PianoSampleDataset(Dataset):
         last_onset_vel : 0 0 0 0 0 0 0|v v v v v 0 0 0 0 V V V V V V 
         '''
 
-        data = self.data[index]
-        result = dict(path=data['path'])
+        audio_path = self.data_path[index][0]
+        saved_data_path = audio_path.replace('.flac', '_parsed.pt').replace('.wav', '_parsed.pt')
+        data = th.load(saved_data_path)
+        result = dict(path=audio_path)
 
         if self.sample_length is not None:  # fixed length segmentation
             audio_length = len(data['audio'])
@@ -113,7 +118,7 @@ class PianoSampleDataset(Dataset):
 
         else: # use whole sequence at ones; padding
             audio = data['audio']
-            pad_len = np.ceil(len(audio) / HOP) * HOP - len(audio)
+            pad_len = math.ceil(len(audio) / HOP) * HOP - len(audio)
             result['audio'] = F.pad(audio, (0, pad_len))
             for el in self.frame_features:
                 result[el] = F.pad(data[el], (0,0,self.delay,0))
@@ -121,23 +126,21 @@ class PianoSampleDataset(Dataset):
             result['time'] = data['time']
 
         result['audio'] = result['audio'].float().div_(32768.0)
-        if self.audio_transform:
-            result['audio'] = self.audio_transform(result['audio'])
 
         # make 'last onset features'
         frame_mask = result['label'] > 0
-        last_onset_time = th.clamp(data['last_onset_time'], 0, 156) * frame_mask # 5sec
-        last_onset_vel = th.clamp(data['last_onset_vel'], 0, 128) * frame_mask
+        last_onset_time = th.clamp(result['last_onset_time'], 0, 156) * frame_mask # 5sec
+        last_onset_vel = th.clamp(result['last_onset_vel'], 0, 128) * frame_mask
         
         last_onset_time = last_onset_time.float()
         last_onset_vel = last_onset_vel.float()
         if self.transform:
-            last_onset_time = self.last_time_transform(last_onset_time)
-            last_onset_vel = self.last_vel_transform(last_onset_vel)
+            last_onset_time = onset_time_transform(last_onset_time, 0.2, 0.3, 0.0)
+            last_onset_vel = vel_transform(last_onset_vel, 0.2, 0.3, 0.0)
         
-        result['shifted_label'] = data['shifted_label'].long()
-        result['shifted_pedal'] = data['shifted_pedal'].long()
-        result['shifted_vel'] = result['shifted_vel'].long()
+        result['label'] = result['label'].long()
+        result['pedal_label'] = result['pedal_label'].long()
+        result['velocity'] = result['velocity'].long()
         result['last_onset_time'] = last_onset_time.div_(330)
         result['last_onset_vel'] = last_onset_vel.div_(128)
 
@@ -157,6 +160,10 @@ class PianoSampleDataset(Dataset):
         """return the list of input files (audio_filename, tsv_filename) for this group"""
         raise NotImplementedError
 
+    def initialize(self):
+        for input_pair in tqdm(self.data_path, desc='initialize files:', ncols=100):
+            self.load(*input_pair) 
+        
     def load(self, audio_path, tsv_path):
         """
         load an audio track and the corresponding labels
@@ -168,10 +175,12 @@ class PianoSampleDataset(Dataset):
         """
         saved_data_path = audio_path.replace('.flac', '_parsed.pt').replace('.wav', '_parsed.pt')
         if Path(saved_data_path).exists():
-            print(saved_data_path)
-            return th.load(saved_data_path)
+            return 
 
-        audio, sr = soundfile.read(audio_path, dtype='int16')
+        try:
+            audio, sr = soundfile.read(audio_path, dtype='int16')
+        except:
+            print(audio_path)
         assert sr == SR
         '''
         saved_data_path = audio_path.replace('.wav', '_parsed.pt')
@@ -207,6 +216,11 @@ class PianoSampleDataset(Dataset):
             frame_right = int(round(offset * SR / HOP))
             frame_right = min(n_steps, frame_right)
             offset_right = min(n_steps, frame_right + 1)
+
+            if left > n_steps:
+                print(f'Warning: onset after audio ends {audio_length//SR}. {audio_path}. \
+                      {onset},{offset},{note},{vel}')
+                return
 
             # off->off :0, on -> off :1, off->onset :2, on -> on :3, on -> onset :4,
             f = int(note) - MIN_MIDI
@@ -258,7 +272,7 @@ class PianoSampleDataset(Dataset):
         data = dict(path=audio_path, audio=audio, label=label, pedal_label=pedal_label, velocity=velocity, 
                     last_onset_time=last_onset_time, last_onset_vel=last_onset_vel, time=0)
         th.save(data, saved_data_path)
-        return data
+        return 
 
 
 class MAESTRO(PianoSampleDataset):

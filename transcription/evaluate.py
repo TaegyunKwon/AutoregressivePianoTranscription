@@ -26,7 +26,6 @@ def evaluate(sample, label, sample_vel=None, vel_ref=None):
     else:
         vel_est = th.ones_like(sample)
         vel_ref = th.ones_like(sample)
-
     p_est, i_est, v_est = extract_notes(onset_est, frame_est, vel_est)
     p_ref, i_ref, v_ref = extract_notes(onset_ref, frame_ref, vel_ref)
 
@@ -73,11 +72,13 @@ def evaluate(sample, label, sample_vel=None, vel_ref=None):
     metrics['metric/note-with-offsets-and-velocity/overlap'].append(o)
 
 
-    onset_loc = np.where(onset_ref)
+    onset_loc = th.where(onset_ref)
 
     gt = vel_ref[onset_loc]
     est = vel_est[onset_loc]
     err = est - gt
+    err = err.detach().cpu().numpy()
+    gt = gt.detach().cpu().numpy()
 
     metrics['metric/onset_velocity/abs_err'].append(np.mean(np.abs(err)))
     metrics['metric/onset_velocity/rel_err'].append(np.mean(np.abs(err) / gt))
