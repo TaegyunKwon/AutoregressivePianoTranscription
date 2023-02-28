@@ -134,13 +134,13 @@ class ModelSaver():
         if step > 1000:
             return f'opt_{step//1000}k.pt'
         else:
-            return f'opt_{step}k.pt'
+            return f'opt_{step}.pt'
     
     def save_name(self, step, score):
         if step > 1000:
             return f'model_{step//1000}k_{score:.4f}.pt'
         else:
-            return f'model_{step}k_{score:.4f}.pt'
+            return f'model_{step}_{score:.4f}.pt'
     
     def write_csv(self):
         with open(self.logdir / 'checkpoint.csv', "w") as f:
@@ -153,6 +153,7 @@ class ModelSaver():
         self.update_optim(optimizer, step)
         self.top_n.append((save_name, score))
         self.update_top_n()
+        self.last_step = step
 
     def update_top_n(self): 
         if len(self.top_n) <= self.n_keep:
@@ -173,12 +174,12 @@ class Losses(nn.Module):
     def __init__(self):
         super().__init__()
         self.frame_loss_fn = FocalLoss(alpha=1.0, gamma=2.0) # In: B x C x *
-        self.vel_loss_fn = nn.MSELoss() # In: B x *
+        self.vel_loss_fn = nn.MSELoss(reduction='none') # In: B x *
 
     def forward(self, logit, vel, label, vel_label):
-        frame_loss = self.frame_loss_fn(logit.permute(0, 3, 1, 2), label).mean()
+        frame_loss = self.frame_loss_fn(logit.permute(0, 3, 1, 2), label)
         onset_mask = ((label == 2) + (label == 4))>0
-        vel_loss = self.vel_loss_fn(vel*onset_mask, th.true_divide(vel_label, 128)*onset_mask).mean()
+        vel_loss = self.vel_loss_fn(vel*onset_mask, th.true_divide(vel_label, 128)*onset_mask)
 
         return frame_loss, vel_loss
     
@@ -196,7 +197,7 @@ def train_step(model, batch, loss_fn, optimizer, scheduler, device, rank, step, 
                                 random_condition=config.random_condition)
     # frame out: B x T x 88 x C
     loss, vel_loss = loss_fn(frame_out, vel_out, shifted_label[:, 1:], shifted_vel[:, 1:])
-    total_loss = loss + vel_loss
+    total_loss = loss.mean() + vel_loss.mean()
     total_loss.backward()
     for parameter in model.parameters():
         clip_grad_norm_([parameter], 3.0)
@@ -204,7 +205,7 @@ def train_step(model, batch, loss_fn, optimizer, scheduler, device, rank, step, 
     optimizer.step()
     scheduler.step()
     if rank == 0:
-        run.log({"train": dict(frame_loss=loss, vel_loss=vel_loss)}, step=step)
+        run.log({"train": dict(frame_loss=loss.mean(), vel_loss=vel_loss.mean())}, step=step)
     
 def valid_step(model, batch, loss_fn, device, config):
     audio = batch['audio'].to(device)
@@ -223,12 +224,13 @@ def valid_step(model, batch, loss_fn, device, config):
         metrics = evaluate(sample, shifted_label[n][1:])
         for k, v in metrics.items():
             validation_metric[k].append(v)
-    validation_metric['frame_loss'] = loss
-    validation_metric['vel_loss'] = vel_loss
+    validation_metric['frame_loss'] = loss.mean(dim=(1,2))
+    validation_metric['vel_loss'] = vel_loss.mean(dim=(1,2))
     
     return validation_metric
 
 def train(rank, world_size, run, config, ddp=True):
+    th.cuda.set_device(rank)
     if ddp:
         setup(rank, world_size)
     else:
@@ -306,28 +308,19 @@ def train(rank, world_size, run, config, ddp=True):
                     with th.no_grad():
                         batch_metric = valid_step(model, batch, loss_fn, device, config)
                         for k, v in batch_metric.items():
-                            validation_metric[k].append(v)
+                            validation_metric[k].extend(v)
                 valid_rank_mean = defaultdict(list)
-                for k,v in validation_metric.items():
-                    if 'loss' in k:
-                        valid_rank_mean[k] = th.mean(th.stack(v)).to(rank)
-                        print(valid_rank_mean[k])
-                    else:
-                        valid_rank_mean[k] = th.from_numpy(np.mean(v)).to(rank)
-                print('checkpoint:a')
                 if ddp:
                     if rank == 0:
                         valid_mean = defaultdict(list)
-                    for k,v in valid_rank_mean.items():
-                        print(k, v.shape, v.device)
-                        metric_gather = [th.zeros(1, dtype=th.float) for _ in range(world_size)]
-                        dist.gather(v, metric_gather if rank==0 else None)
-                        print(f"{k} gathered")
-                        output = [None for _ in gather_objects]
-                        # dist.gather_object(v, metric_gather if rank==0 else None, dst=0)
-                        if rank == 0:
-                            valid_mean[k] = th.mean(metric_gather)
-                    print('checkpoint:b')
+                    output = [None for _ in range(world_size)]
+                    dist.gather_object(validation_metric, output if rank==0 else None, dst=0)
+                    if rank == 0:
+                        for k,v in validation_metric.items():
+                            if 'loss' in k:
+                                valid_mean[k] = th.mean(th.cat([th.stack(el[k]).cpu() for el in output]))
+                            else:
+                                valid_mean[k] = np.mean(np.concatenate([el[k] for el in output]))
                 else:
                     valid_mean = valid_rank_mean
                 
@@ -337,8 +330,8 @@ def train(rank, world_size, run, config, ddp=True):
                     run.log({'valid':valid_mean}, step=step)
                     for key, value in valid_mean.items():
                         if key[-2:] == 'f1' or 'loss' in key or key[-3:] == 'err':
-                            print(f'{key} : {np.mean(value)}')
-                    model_saver.update(model, optimizer, step, valid_mean['loss'])
+                            print(f'{key} : {value}')
+                    model_saver.update(model, optimizer, step, valid_mean['frame_loss'])
                 if ddp:
                     dist.barrier()
             if step >= config.iteration:
