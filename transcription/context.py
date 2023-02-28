@@ -11,7 +11,8 @@ def random_modification(tensor, change_prob, reonset_prob=0.03, onset_prob=0.05,
     mask_near = (F.pad(mask[:, 3:], (0,0,0,3)) + F.pad(mask[:,:-3], (0,0,3,0)))>0
     idx = th.nonzero(mask_near, as_tuple=True)
     n_change = int(len(idx[0])*change_prob)
-    idx = [el[:n_change] for el in idx]
+    perm = th.randperm(len(idx[0]))[:n_change]
+    idx = [el[perm] for el in idx]
 
     rand_arr = th.multinomial(
         th.tensor([off_prob, onset_prob, offset_prob, sustain_prob, reonset_prob]), 

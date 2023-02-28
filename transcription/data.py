@@ -141,7 +141,7 @@ class PianoSampleDataset(Dataset):
         result['label'] = result['label'].long()
         result['pedal_label'] = result['pedal_label'].long()
         result['velocity'] = result['velocity'].long()
-        result['last_onset_time'] = last_onset_time.div_(330)
+        result['last_onset_time'] = last_onset_time.div_(156)
         result['last_onset_vel'] = last_onset_vel.div_(128)
 
         return result
@@ -227,6 +227,7 @@ class PianoSampleDataset(Dataset):
 
             if last_onset_loc[f] != -1:
                 last_onset_time[last_onset_loc[f]:left, f] = th.arange(1, int(left - last_onset_loc[f] + 1))
+                last_onset_vel[last_onset_loc[f]:left, f] = last_onset_vel_save[f] * th.ones(left - last_onset_loc[f])
             last_onset_loc[f] = left
             last_onset_vel_save[f] = vel
             if left > 0 and label[left-1, f] <= 1:

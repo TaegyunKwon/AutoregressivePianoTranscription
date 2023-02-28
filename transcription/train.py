@@ -215,7 +215,7 @@ def valid_step(model, batch, loss_fn, device, config):
     last_onset_vel = batch['last_onset_vel'].to(device)
     frame_out, vel_out = model(audio, shifted_label[:, :-1], 
                                 last_onset_time[:, :-1], last_onset_vel[:, :-1], 
-                                random_condition=config.random_condition)
+                                random_condition=False)
     # frame out: B x T x 88 x C
     loss, vel_loss = loss_fn(frame_out, vel_out, shifted_label[:, 1:], shifted_vel[:, 1:])
     validation_metric = defaultdict(list)
