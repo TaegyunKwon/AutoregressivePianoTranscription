@@ -337,20 +337,16 @@ class MAESTRO_V3(PianoSampleDataset):
                 row[2] == group])
         result = []
 
-        first_tsv = files[0][1].with_suffix('.tsv')
-        if not os.path.exists(first_tsv):
-          for audio_path, midi_path in tqdm(files, desc='Converting midi to tsv group %s' % group, ncols=100):
-              tsv_filename = midi_path.with_suffix('.tsv')
-              midi = parse_midi(midi_path)
-              np.savetxt(tsv_filename, midi, fmt='%.6f', delimiter='\t', header='onset,offset,note,velocity')
-              pedal = parse_pedal(midi_path)
-              np.savetxt(tsv_filename.parent / (tsv_filename.stem + '_pedal.tsv'), pedal, fmt='%.6f', delimiter='\t', header='onset,offset,type')
-              result.append((str(audio_path), str(tsv_filename)))
-        else:
-          # for audio_path, midi_path in files:
-          for audio_path, midi_path in tqdm(files, desc='Converting midi to tsv group %s' % group, ncols=100):
-              tsv_filename = midi_path.with_suffix('.tsv')
-              result.append((str(audio_path), str(tsv_filename)))
+        for audio_path, midi_path in tqdm(files, desc='Converting midi to tsv group %s' % group, ncols=100):
+            tsv_filename = midi_path.with_suffix('.tsv')
+            if not tsv_filename.exists():
+                midi = parse_midi(midi_path)
+                np.savetxt(tsv_filename, midi, fmt='%.6f', delimiter='\t', header='onset,offset,note,velocity')
+                pedal = parse_pedal(midi_path)
+                np.savetxt(tsv_filename.parent / (tsv_filename.stem + '_pedal.tsv'), pedal, fmt='%.6f', delimiter='\t', header='onset,offset,type')
+            else:
+                pass
+            result.append((str(audio_path), str(tsv_filename)))
         return result
         
 
@@ -475,17 +471,14 @@ class ViennaCorpus(PianoSampleDataset):
 
         result = []
 
-        first_tsv = files[0][1].replace('.mid', '.tsv').replace('.mid', '.tsv')
-        if not os.path.exists(first_tsv):
-          for audio_path, midi_path in tqdm(files, desc='Converting midi to tsv group %s' % group, ncols=100):
-              tsv_filename = midi_path.replace('.mid', '.tsv').replace('.mid', '.tsv')
-              midi = parse_midi(midi_path)
-              np.savetxt(tsv_filename, midi, fmt='%.6f', delimiter='\t', header='onset,offset,note,velocity')
-              pedal = parse_pedal(midi_path)
-              np.savetxt(tsv_filename.replace('.tsv', '_pedal.tsv'), pedal, fmt='%.6f', delimiter='\t', header='onset,offset,type')
-              result.append((audio_path, tsv_filename))
-        else:
-          for audio_path, midi_path in files:
-              tsv_filename = midi_path.replace('.mid', '.tsv').replace('.mid', '.tsv')
-              result.append((audio_path, tsv_filename))
-        return result
+        for audio_path, midi_path in tqdm(files, desc='Converting midi to tsv group %s' % group, ncols=100):
+            tsv_filename = midi_path.replace('.mid', '.tsv').replace('.mid', '.tsv')
+            if not tsv_filename.exists():
+                midi = parse_midi(midi_path)
+                np.savetxt(tsv_filename, midi, fmt='%.6f', delimiter='\t', header='onset,offset,note,velocity')
+                pedal = parse_pedal(midi_path)
+                np.savetxt(tsv_filename.replace('.tsv', '_pedal.tsv'), pedal, fmt='%.6f', delimiter='\t', header='onset,offset,type')
+                result.append((audio_path, tsv_filename))
+            else:
+                pass
+            result.append((audio_path, tsv_filename))

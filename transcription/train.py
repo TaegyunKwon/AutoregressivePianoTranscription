@@ -8,6 +8,7 @@ import json
 import csv
 from types import SimpleNamespace
 from collections import defaultdict
+from tqdm import tqdm
 
 import torch as th
 import torch.distributed as dist
@@ -203,7 +204,7 @@ def train_step(model, batch, loss_fn, optimizer, scheduler, device, rank, step, 
     optimizer.step()
     scheduler.step()
     if rank == 0:
-        run.log({"train": dict(loss=loss, vel_loss=vel_loss)}, step=step)
+        run.log({"train": dict(frame_loss=loss, vel_loss=vel_loss)}, step=step)
     
 def valid_step(model, batch, loss_fn, device, config):
     audio = batch['audio'].to(device)
@@ -222,7 +223,7 @@ def valid_step(model, batch, loss_fn, device, config):
         metrics = evaluate(sample, shifted_label[n][1:])
         for k, v in metrics.items():
             validation_metric[k].append(v)
-    validation_metric['loss'] = loss
+    validation_metric['frame_loss'] = loss
     validation_metric['vel_loss'] = vel_loss
     
     return validation_metric
@@ -288,10 +289,12 @@ def train(rank, world_size, run, config, ddp=True):
 
     loss_fn = Losses()
 
+    if rank == 0: loop = tqdm(range(step, config.iteration), total=config.iteration, initial=step)
     for epoch in range(10000):
         if ddp:
             data_loader_train.sampler.set_epoch(epoch)
         for batch in data_loader_train:
+            if rank ==0: loop.update(1)
             step += 1
             train_step(model, batch, loss_fn, optimizer, scheduler, device, rank, step, config, run)
 
@@ -307,21 +310,30 @@ def train(rank, world_size, run, config, ddp=True):
                 valid_rank_mean = defaultdict(list)
                 for k,v in validation_metric.items():
                     if 'loss' in k:
-                        valid_rank_mean[k] = th.mean(th.stack(v))
+                        valid_rank_mean[k] = th.mean(th.stack(v)).to(rank)
+                        print(valid_rank_mean[k])
                     else:
-                        valid_rank_mean[k] = np.mean(v)
+                        valid_rank_mean[k] = th.from_numpy(np.mean(v)).to(rank)
+                print('checkpoint:a')
                 if ddp:
-                    metric_gather = [None for _ in range(world_size)]
-                    dist.gather_object(validation_metric, metric_gather if rank==0 else None, dst=0)
                     if rank == 0:
                         valid_mean = defaultdict(list)
-                        for k,v in valid_rank_mean.items():
-                            valid_mean[k] = np.mean([el[k] for el in metric_gather])
+                    for k,v in valid_rank_mean.items():
+                        print(k, v.shape, v.device)
+                        metric_gather = [th.zeros(1, dtype=th.float) for _ in range(world_size)]
+                        dist.gather(v, metric_gather if rank==0 else None)
+                        print(f"{k} gathered")
+                        output = [None for _ in gather_objects]
+                        # dist.gather_object(v, metric_gather if rank==0 else None, dst=0)
+                        if rank == 0:
+                            valid_mean[k] = th.mean(metric_gather)
+                    print('checkpoint:b')
                 else:
                     valid_mean = valid_rank_mean
                 
                 model.train()
                 if rank == 0:
+                    print('validation metric')
                     run.log({'valid':valid_mean}, step=step)
                     for key, value in valid_mean.items():
                         if key[-2:] == 'f1' or 'loss' in key or key[-3:] == 'err':
