@@ -29,8 +29,8 @@ from adabelief_pytorch import AdaBelief
 from .model import ARModel
 from .data import MAESTRO_V3
 from .loss import FocalLoss
-from .representation import convert2onsets_and_frames
 from .evaluate import evaluate
+from .utils import summary
 
 th.autograd.set_detect_anomaly(True)
 
@@ -88,10 +88,10 @@ class ToyModel(nn.Module):
     def forward(self, x):
         return self.net(x)
     
-def get_dataset(config, split, random_sample):
+def get_dataset(config, split, random_sample, transform):
     if config.dataset == 'MAESTRO_V3':
         return MAESTRO_V3(groups=split, sequence_length=config.seq_len, 
-                          random_sample=random_sample, transform=config.random_condition)
+                          random_sample=random_sample, transform=transform)
 
 class ModelSaver():
     def __init__(self, logdir, config, order='lower', n_keep=3, resume=False):
@@ -198,7 +198,7 @@ def train_step(model, batch, loss_fn, optimizer, scheduler, device, rank, step, 
     # frame out: B x T x 88 x C
     loss, vel_loss = loss_fn(frame_out, vel_out, shifted_label[:, 1:], shifted_vel[:, 1:])
     total_loss = loss.mean() + vel_loss.mean()
-    total_loss.backward()
+    total_loss.mean().backward()
     for parameter in model.parameters():
         clip_grad_norm_([parameter], 3.0)
 
@@ -241,6 +241,8 @@ def train(rank, world_size, run, config, ddp=True):
     np.random.seed(seed)
 
     model = ARModel(config).to(rank)
+    if rank == 0:
+        summary(model)
     # model = ToyModel().to(rank)
     if ddp:
         model = DDP(model, device_ids=[rank])
@@ -264,8 +266,8 @@ def train(rank, world_size, run, config, ddp=True):
         step = 0
         
     scheduler = StepLR(optimizer, step_size=5000, gamma=0.95)
-    train_set = get_dataset(config, ['train'], random_sample=True)
-    valid_set = get_dataset(config, ['validation'], random_sample=False)
+    train_set = get_dataset(config, ['train'], random_sample=True, transform=True)
+    valid_set = get_dataset(config, ['validation'], random_sample=False, transform=False)
     if ddp:
         train_sampler = DistributedSampler(dataset=train_set, num_replicas=world_size, 
                                         rank=rank, shuffle=True)
@@ -300,7 +302,7 @@ def train(rank, world_size, run, config, ddp=True):
             step += 1
             train_step(model, batch, loss_fn, optimizer, scheduler, device, rank, step, config, run)
 
-            if step % config.valid_interval == 0:
+            if step % config.valid_interval == 0 or step == 5000:
                 model.eval()
 
                 validation_metric = defaultdict(list)
@@ -309,10 +311,8 @@ def train(rank, world_size, run, config, ddp=True):
                         batch_metric = valid_step(model, batch, loss_fn, device, config)
                         for k, v in batch_metric.items():
                             validation_metric[k].extend(v)
-                valid_rank_mean = defaultdict(list)
+                valid_mean = defaultdict(list)
                 if ddp:
-                    if rank == 0:
-                        valid_mean = defaultdict(list)
                     output = [None for _ in range(world_size)]
                     dist.gather_object(validation_metric, output if rank==0 else None, dst=0)
                     if rank == 0:
@@ -322,7 +322,11 @@ def train(rank, world_size, run, config, ddp=True):
                             else:
                                 valid_mean[k] = np.mean(np.concatenate([el[k] for el in output]))
                 else:
-                    valid_mean = valid_rank_mean
+                    for k,v in validation_metric.items():
+                        if 'loss' in k:
+                            valid_mean[k] = th.mean(th.cat(th.stack(v).cpu()))
+                        else:
+                            valid_mean[k] = np.mean(np.concatenate(v))
                 
                 model.train()
                 if rank == 0:
@@ -376,7 +380,7 @@ if __name__ == '__main__':
         config.iteration=100
     print(config)
 
-    dataset = get_dataset(config, ['train', 'validation', 'test'], random_sample=False)
+    dataset = get_dataset(config, ['train', 'validation', 'test'], random_sample=False, transform=False)
     dataset.initialize()
 
     if args.resume_id:
