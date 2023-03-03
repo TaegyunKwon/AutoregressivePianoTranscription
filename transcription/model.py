@@ -36,7 +36,8 @@ class ARModel(nn.Module):
         else:
             raise KeyError
             
-        self.context_net = ContextNet(config.hidden_per_pitch, out_dim=4)
+        # self.context_net = ContextNet(config.hidden_per_pitch, out_dim=4)
+        self.context_net = ContextNetJoint(config.hidden_per_pitch, out_dim=4)
 
         self.lstm = nn.LSTM(config.hidden_per_pitch+4, config.lstm_unit, num_layers=2, batch_first=False, bidirectional=False)
         self.output = nn.Linear(config.lstm_unit, 5)
@@ -186,6 +187,26 @@ class ARModel(nn.Module):
 
         return frame_out, vel_out, lstm_hidden, vel_lstm_hidden
 
+class ContextNetJoint(nn.Module):
+    def __init__(self, n_hidden, out_dim=4):
+        super().__init__()
+        self.joint_net = nn.Sequential(
+            nn.Linear(2, n_hidden),
+            nn.ReLU(),
+            nn.Linear(n_hidden, n_hidden),
+            nn.ReLU()
+        )
+
+        self.embedding = nn.Embedding(5, 2)
+
+        self.concat_net = nn.Linear(n_hidden+2, out_dim)
+
+    def forward(self, last, last_time, last_onset):
+        joint_embed = self.joint_net(th.cat((last_time, last_onset), dim=-1))
+        last = self.embedding(last)  # B x T x 88 x 5
+        concat = th.cat((last, joint_embed), dim=-1)
+        concat = self.concat_net(concat).permute(0, 1, 3, 2)
+        return concat # B x T x out_dim x 88
 
 class ContextNet(nn.Module):
     # Hard output states to continous values
@@ -218,8 +239,9 @@ class ContextNet(nn.Module):
         return concat # B x T x out_dim x 88
 
 
+'''
 class FilmLayer(nn.Module):
-    def __init__(self, n_f, hidden=16):
+    def __init__(self, n_f, channel, hidden=16):
         super().__init__()
         pitch = (th.arange(n_f)/n_f).view(n_f, 1)
         self.register_buffer('pitch', pitch.float())
@@ -230,7 +252,7 @@ class FilmLayer(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden, hidden),
             nn.ReLU(),
-            nn.Linear(hidden, 1, bias=False),
+            nn.Linear(hidden, channel, bias=False),
         )
         self.beta_linear = nn.Sequential(
             nn.Linear(1, hidden),
@@ -239,15 +261,17 @@ class FilmLayer(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden, hidden),
             nn.ReLU(),
-            nn.Linear(hidden, 1, bias=False),
+            nn.Linear(hidden, channel, bias=False),
         )
 
     def forward(self, x):
-        # x : shape of (***, F)
-        alpha = self.alpha_linear(self.pitch).squeeze()
-        beta = self.beta_linear(self.pitch).squeeze()
-
-        return alpha * x + beta
+        # x : shape of (B,C,L,F)
+        alpha = self.alpha_linear(self.pitch) # F x C
+        beta = self.beta_linear(self.pitch)
+        
+        x = x.permute(0,2,3,1) # (B, L, F, C)
+        x = alpha * x + beta
+        return x.permute(0, 3, 1, 2)
 
 
 class FilmBlock(nn.Module):
@@ -256,7 +280,7 @@ class FilmBlock(nn.Module):
         self.conv1 = nn.Conv2d(n_input, n_unit, (3, 3), padding=1)
         self.conv2 = nn.Conv2d(n_unit, n_unit, (3, 3), padding=1)
         self.bn = nn.BatchNorm2d(n_unit)
-        self.film = FilmLayer(n_f, hidden=hidden)
+        self.film = FilmLayer(n_f, n_unit, hidden=hidden)
 
     def forward(self, x):
         # x : shape of B C F L
@@ -266,8 +290,52 @@ class FilmBlock(nn.Module):
         res = self.film(res.transpose(2,3)).transpose(2,3)
         x = F.relu(x + res)
         return x
+'''
 
-        
+class FilmBlock(nn.Module):
+    def __init__(self, n_input, n_unit, n_f):
+        super().__init__()
+
+        pitch = (th.range(1, n_f)/n_f).view(1, n_f, 1)
+        self.register_buffer('pitch', pitch.float())
+
+        self.conv1 = nn.Conv2d(n_input, n_unit, (3, 3), padding=1)
+        self.conv2 = nn.Conv2d(n_unit, n_unit, (3, 3), padding=1)
+        self.bn = nn.BatchNorm2d(n_unit)
+        self.alpha_linear = nn.Sequential(
+            nn.Linear(1, 16),
+            nn.ReLU(),
+            nn.Linear(16, 16),
+            nn.ReLU(),
+            nn.Linear(16, 16),
+            nn.ReLU(),
+            nn.Linear(16, n_unit),
+        )
+        self.beta_linear = nn.Sequential(
+            nn.Linear(1, 16),
+            nn.ReLU(),
+            nn.Linear(16, 16),
+            nn.ReLU(),
+            nn.Linear(16, 16),
+            nn.ReLU(),
+            nn.Linear(16, n_unit),
+        )
+
+    def forward(self, x):
+        # x : shape of B C F L
+        batch_size = x.shape[0]
+        alpha = self.alpha_linear(self.pitch)\
+            .transpose(1,2).unsqueeze(-1)  # 1 C F 1
+        beta = self.beta_linear(self.pitch)\
+            .transpose(1,2).unsqueeze(-1)  # 1 C F 1
+
+        x = F.relu(self.conv1(x))
+        res = self.conv2(x)
+        res = self.bn(res)
+        res = alpha * res + beta
+        x = F.relu(x + res)
+        return x
+
 class PAR(nn.Module):
     def __init__(self, n_mels, cnn_unit, fc_unit, win_fw, win_bw, hidden_per_pitch):
         super().__init__()
