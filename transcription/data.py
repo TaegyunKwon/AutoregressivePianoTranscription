@@ -113,9 +113,7 @@ class PianoSampleDataset(Dataset):
             else:  # if no previous frames exist
                 for el in self.frame_features:
                     result[el] = F.pad(data[el][step_begin:step_end, :], (0,0,self.delay,0))
-
-            result['time'] = begin / SR
-
+            result['time'] = begin / SR 
         else: # use whole sequence at ones; padding
             audio = data['audio']
             pad_len = math.ceil(len(audio) / HOP) * HOP - len(audio)

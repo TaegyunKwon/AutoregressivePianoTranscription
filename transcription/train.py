@@ -40,7 +40,7 @@ def remove_progress(captured_out):
     return '\n'.join(lines)
 
 default_dict = dict(
-    n_mels=700,
+    n_mels=704,
     n_fft=4096,
     f_min=27.5,
     f_max=8000,
@@ -116,9 +116,10 @@ class ModelSaver():
             self.last_step = int(self.last_ckp.split('_')[0])
             self.last_opt = self.save_name_opt(self.last_step)
 
-    def save_model(self, model, save_name):
+    def save_model(self, model, save_name, ddp):
         save_dict = self.config.__dict__
-        save_dict['model_state_dict'] = model.state_dict()
+        state_dict = model.module.state_dict() if ddp else model.state_dict()
+        save_dict['model_state_dict'] = state_dict
         th.save(save_dict, self.logdir / save_name)
         self.last_ckp = save_name
 
@@ -147,9 +148,9 @@ class ModelSaver():
             writer = csv.writer(f, delimiter=',')
             writer.writerows([(el[0], el[1]) for el in self.top_n])
     
-    def update(self, model, optimizer, step, score):
+    def update(self, model, optimizer, step, score, ddp):
         save_name = self.save_name(step, score)
-        self.save_model(model, save_name)
+        self.save_model(model, save_name, ddp)
         self.update_optim(optimizer, step)
         self.top_n.append((save_name, score))
         self.update_top_n()
@@ -221,13 +222,25 @@ def valid_step(model, batch, loss_fn, device, config):
     validation_metric = defaultdict(list)
     for n in range(audio.shape[0]):
         sample = frame_out[n].argmax(dim=-1)
-        metrics = evaluate(sample, shifted_label[n][1:])
+        metrics = evaluate(sample, shifted_label[n][1:], vel_out, shifted_vel[n][1:])
         for k, v in metrics.items():
             validation_metric[k].append(v)
     validation_metric['frame_loss'] = loss.mean(dim=(1,2))
     validation_metric['vel_loss'] = vel_loss.mean(dim=(1,2))
     
     return validation_metric
+
+def transcribe(model, batch, loss_fn, device, config):
+    audio = batch['audio'].to(device)
+    shifted_label = batch['label'].to(device)
+    shifted_vel = batch['velocity'].to(device)
+    last_onset_time = batch['last_onset_time'].to(device)
+    last_onset_vel = batch['last_onset_vel'].to(device)
+    frame_out, vel_out = model(audio, shifted_label[:, :-1], 
+                                last_onset_time[:, :-1], last_onset_vel[:, :-1], 
+                                random_condition=False)
+    
+    return frame_out, vel_out
 
 def train(rank, world_size, run, config, ddp=True):
     th.cuda.set_device(rank)
@@ -335,7 +348,7 @@ def train(rank, world_size, run, config, ddp=True):
                     for key, value in valid_mean.items():
                         if key[-2:] == 'f1' or 'loss' in key or key[-3:] == 'err':
                             print(f'{key} : {value}')
-                    model_saver.update(model, optimizer, step, valid_mean['frame_loss'])
+                    model_saver.update(model, optimizer, step, valid_mean['frame_loss'], ddp=ddp)
                 if ddp:
                     dist.barrier()
             if step >= config.iteration:
