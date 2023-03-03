@@ -33,6 +33,8 @@ class ARModel(nn.Module):
                                 config.win_fw, config.win_bw, config.hidden_per_pitch)
             self.vel_acoustic = PC(config.n_mels, config.cnn_unit,
                                 config.win_fw, config.win_bw, config.hidden_per_pitch)
+        else:
+            raise KeyError
             
         self.context_net = ContextNet(config.hidden_per_pitch, out_dim=4)
 
