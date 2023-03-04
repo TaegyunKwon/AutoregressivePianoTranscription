@@ -199,6 +199,7 @@ def train_step(model, batch, loss_fn, optimizer, scheduler, device, rank, step, 
     # frame out: B x T x 88 x 5
     loss, vel_loss = loss_fn(frame_out, vel_out, shifted_label[:, 1:], shifted_vel[:, 1:])
     total_loss = loss.mean() + vel_loss.mean()
+    optimizer.zero_grad()
     total_loss.mean().backward()
     for parameter in model.parameters():
         clip_grad_norm_([parameter], 3.0)
