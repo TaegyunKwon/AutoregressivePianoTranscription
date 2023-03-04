@@ -196,7 +196,7 @@ def train_step(model, batch, loss_fn, optimizer, scheduler, device, rank, step, 
     frame_out, vel_out = model(audio, shifted_label[:, :-1], 
                                 last_onset_time[:, :-1], last_onset_vel[:, :-1], 
                                 random_condition=config.random_condition)
-    # frame out: B x T x 88 x C
+    # frame out: B x T x 88 x 5
     loss, vel_loss = loss_fn(frame_out, vel_out, shifted_label[:, 1:], shifted_vel[:, 1:])
     total_loss = loss.mean() + vel_loss.mean()
     total_loss.mean().backward()
@@ -222,7 +222,7 @@ def valid_step(model, batch, loss_fn, device, config):
     validation_metric = defaultdict(list)
     for n in range(audio.shape[0]):
         sample = frame_out[n].argmax(dim=-1)
-        metrics = evaluate(sample, shifted_label[n][1:], vel_out, shifted_vel[n][1:])
+        metrics = evaluate(sample, shifted_label[n][1:], vel_out[n], shifted_vel[n][1:])
         for k, v in metrics.items():
             validation_metric[k].append(v)
     validation_metric['frame_loss'] = loss.mean(dim=(1,2))
@@ -258,6 +258,7 @@ def train(rank, world_size, run, config, ddp=True):
         summary(model)
     # model = ToyModel().to(rank)
     if ddp:
+        model = th.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         model = DDP(model, device_ids=[rank])
     optimizer = AdaBelief(model.parameters(), lr=config.lr, 
                           eps=1e-16, betas=(0.9,0.999), weight_decouple=True, 
@@ -313,14 +314,15 @@ def train(rank, world_size, run, config, ddp=True):
         for batch in data_loader_train:
             if rank ==0: loop.update(1)
             step += 1
+            model.train()
             train_step(model, batch, loss_fn, optimizer, scheduler, device, rank, step, config, run)
 
             if step % config.valid_interval == 0 or step == 5000:
                 model.eval()
 
                 validation_metric = defaultdict(list)
-                for batch in data_loader_valid:
-                    with th.no_grad():
+                with th.no_grad():
+                    for batch in data_loader_valid:
                         batch_metric = valid_step(model, batch, loss_fn, device, config)
                         for k, v in batch_metric.items():
                             validation_metric[k].extend(v)
@@ -341,7 +343,6 @@ def train(rank, world_size, run, config, ddp=True):
                         else:
                             valid_mean[k] = np.mean(np.concatenate(v))
                 
-                model.train()
                 if rank == 0:
                     print('validation metric')
                     run.log({'valid':valid_mean}, step=step)

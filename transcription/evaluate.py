@@ -12,6 +12,7 @@ from mir_eval.transcription_velocity import precision_recall_f1_overlap as evalu
 from .constants import HOP, SR, MIN_MIDI
 from .decode import extract_notes, notes_to_frames
 
+#  BASE       = ['off', 'offset', 'onset', 'sustain', 'reonset']
 eps = sys.float_info.epsilon
 def evaluate(sample, label, sample_vel=None, vel_ref=None):
     metrics = defaultdict(list)
@@ -21,7 +22,7 @@ def evaluate(sample, label, sample_vel=None, vel_ref=None):
     onset_ref = ((label == 2) + (label == 4))
     frame_ref = ((label == 2) + (label == 3) + (label == 4))
 
-    if sample_vel:
+    if sample_vel is not None:
         vel_est = th.clamp(sample_vel*128, min=0, max=128)
     else:
         vel_est = th.ones_like(sample)
