@@ -113,25 +113,24 @@ class ARModel(nn.Module):
             for step in range(step_len):
                 if step in seg_edges:
                     offset = step
-                    '''
-                    if step == 0:
-                        conv_out, vel_conv_out = self.local_forward(
-                            audio[:, : (offset + max_step) * HOP + self.n_fft//2],
-                            unpad_end=True)
-                    elif step == seg_edges[-1]:  # last segment
-                        conv_out, vel_conv_out = self.local_forward(
-                            audio[:, offset * HOP - self.n_fft//2 : ],
-                            unpad_start=True)
+                    if step == 0:  # First segment
+                        unpad_start = False
+                        start = 0
                     else:
-                        conv_out, vel_conv_out = self.local_forward(
-                            audio[:, offset * HOP - self.n_fft//2: 
-                                (offset + max_step) * HOP + self.n_fft//2],
-                            unpad_start=True, unpad_end=True)
-                    '''
-                    if step == seg_edges[-1]:  # last segment
-                        conv_out, vel_conv_out = self.local_forward(audio[:, offset * HOP: ])
+                        unpad_start = True
+                        start = offset * HOP - self.n_fft//2 
+
+                    if step == seg_edges[-1]:  # Last segment
+                        unpad_end = False
+                        end = None
                     else:
-                        conv_out, vel_conv_out = self.local_forward(audio[:, offset * HOP : (offset + max_step + 10) * HOP])
+                        # margin for CNN
+                        end = (offset + max_step + 10) * HOP + self.n_fft//2
+                        unpad_end = True
+                    
+                    conv_out, vel_conv_out = self.local_forward(
+                        audio[:, start: end],
+                        unpad_start=unpad_start, unpad_end=unpad_end)
 
                 frame_out, vel_out, h, vel_h = self.recurrent_step(
                     conv_out[:, step - offset].unsqueeze(1), 

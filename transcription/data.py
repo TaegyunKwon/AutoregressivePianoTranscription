@@ -66,7 +66,7 @@ class PianoSampleDataset(Dataset):
         self.transform = transform
 
         self.data_path = []
-        self.max_last = 330
+        self.max_last = 156
 
         self.file_list = dict()
         

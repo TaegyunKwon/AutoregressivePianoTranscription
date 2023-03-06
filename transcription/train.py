@@ -88,9 +88,9 @@ class ToyModel(nn.Module):
     def forward(self, x):
         return self.net(x)
     
-def get_dataset(config, split, random_sample, transform):
+def get_dataset(config, split, sample_len=160256, random_sample=False, transform=False):
     if config.dataset == 'MAESTRO_V3':
-        return MAESTRO_V3(groups=split, sequence_length=config.seq_len, 
+        return MAESTRO_V3(groups=split, sequence_length=sample_len, 
                           random_sample=random_sample, transform=transform)
 
 class ModelSaver():
@@ -277,8 +277,10 @@ def train(rank, world_size, run, config, ddp=True):
     step = 10000
         
     scheduler = StepLR(optimizer, step_size=5000, gamma=0.95)
-    train_set = get_dataset(config, ['train'], random_sample=True, transform=True)
-    valid_set = get_dataset(config, ['validation'], random_sample=False, transform=False)
+    train_set = get_dataset(config, ['train'], sample_len=config.seq_len, 
+                            random_sample=True, transform=True)
+    valid_set = get_dataset(config, ['validation'], sample_len=716800,
+                            random_sample=False, transform=False)
     if ddp:
         train_sampler = DistributedSampler(dataset=train_set, num_replicas=world_size, 
                                         rank=rank, shuffle=True)
