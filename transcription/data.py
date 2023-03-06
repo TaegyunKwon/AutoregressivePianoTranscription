@@ -18,6 +18,17 @@ import soundfile
 from .constants import HOP, SR, MAX_MIDI, MIN_MIDI
 from .midi import parse_midi, parse_pedal
 
+def uniform_augmentation(arr, width, prob):
+    mask = arr > 0
+    idx = th.nonzero(mask, as_tuple=True)
+    n_change = int(len(idx[0])*prob)
+    perm = th.randperm(len(idx[0]))[:n_change]
+    idx = [el[perm] for el in idx]
+    rand_arr = th.rand((n_change,))
+    out_tensor = arr.clone()
+    out_tensor[idx] = out_tensor[idx]*(1+(rand_arr*2-1)*width)
+    return out_tensor
+
 def onset_time_transform(arr, std, prob, zero_prob):
     mask = arr > 0
     prob_arr = th.rand_like(arr)
@@ -55,7 +66,7 @@ class PianoSampleDataset(Dataset):
         self.transform = transform
 
         self.data_path = []
-        self.max_last = 330
+        self.max_last = 156
 
         self.file_list = dict()
         
@@ -67,15 +78,6 @@ class PianoSampleDataset(Dataset):
             self.file_list[group] = self.files(group)
             for input_pair in self.file_list[group]:
                 self.data_path.append(input_pair)
-
-        '''
-        self.data = []
-        print('Loading %d group%s of %s at %s' % (len(groups), 's'[:len(groups) - 1], self.__class__.__name__, path))
-        for group in groups:
-            for input_files in tqdm(self.file_list[group], desc='Loading group %s' % group, ncols=100):
-                self.data.append(self.load(*input_files))
-        '''
-                
 
     def __getitem__(self, index):
         '''
@@ -133,8 +135,8 @@ class PianoSampleDataset(Dataset):
         last_onset_time = last_onset_time.float()
         last_onset_vel = last_onset_vel.float()
         if self.transform:
-            last_onset_time = onset_time_transform(last_onset_time, 0.2, 0.3, 0.0)
-            last_onset_vel = vel_transform(last_onset_vel, 0.2, 0.3, 0.0)
+            last_onset_time = uniform_augmentation(last_onset_time, 0.2, 0.3)
+            last_onset_vel = uniform_augmentation(last_onset_vel, 0.2, 0.3)
         
         result['label'] = result['label'].long()
         result['pedal_label'] = result['pedal_label'].long()
@@ -143,6 +145,20 @@ class PianoSampleDataset(Dataset):
         result['last_onset_vel'] = last_onset_vel.div_(128)
 
         return result
+
+    def sort_by_length(self):
+        step_lens = []
+        for n in range(len(self)):
+            audio_path = self.data_path[n][0]
+            saved_data_path = audio_path.replace('.flac', '_parsed.pt').replace('.wav', '_parsed.pt')
+            data = th.load(saved_data_path)
+            sample_len = data['label'].shape[0]
+            step_lens.append(sample_len)
+        self.data_path = [x for _, x in sorted(zip(step_lens, self.data_path),
+                          key=lambda pair: pair[0], reverse=True)]
+        
+
+
 
     def __len__(self):
         return len(self.data_path)
@@ -180,15 +196,6 @@ class PianoSampleDataset(Dataset):
         except:
             print(audio_path)
         assert sr == SR
-        '''
-        saved_data_path = audio_path.replace('.wav', '_parsed.pt')
-        if Path(saved_data_path).exists():
-            return th.load(saved_data_path)
-
-        audio, sr = soundfile.read(audio_path)
-        audio = (audio*32768).astype(np.int16)
-        assert sr == SR
-        '''
 
         if len(audio.shape) == 2:
             audio = np.mean(audio, axis=-1)

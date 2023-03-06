@@ -33,8 +33,8 @@ def update_context(last_onset_time, last_onset_vel, frame, vel, rep_type='base')
     cur_onset_vel = th.zeros_like(last_onset_vel)
 
     onset_pos = onsets == 1
-    frame_pos = onsets != 1 and frames == 1
-    empty_pos = onsets == 0 and frames == 0
+    frame_pos = (onsets != 1) * (frames == 1)
+    empty_pos = (onsets == 0) * (frames == 0)
 
     cur_onset_time = onset_pos + frame_pos*(last_onset_time+1)
     cur_onset_vel = onset_pos*vel + frame_pos*last_onset_vel

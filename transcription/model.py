@@ -18,8 +18,6 @@ class ARModel(nn.Module):
         self.hidden_per_pitch = config.hidden_per_pitch
         self.context_len = self.win_fw + self.win_bw + 1
 
-
-        # self.cqt = CQT(21, 8000, 4, 1, perceptual_w)
         self.melspectrogram = transforms.MelSpectrogram(sample_rate=SR, n_fft=config.n_fft,
             hop_length=HOP, f_min=config.f_min, f_max=config.f_max, n_mels=config.n_mels, normalized=False)
 
@@ -84,6 +82,7 @@ class ARModel(nn.Module):
             batch_size = audio.shape[0]
             audio_len = audio.shape[1]
             step_len = (audio_len - 1) // HOP+ 1
+            device = audio.device
  
             n_segs = ((step_len - 1)//max_step + 1)
             if 0 <= audio_len - (n_segs-1)*max_step* HOP< self.n_fft//2: # padding size of cqt
@@ -91,40 +90,47 @@ class ARModel(nn.Module):
             seg_edges = [el*max_step for el in range(n_segs)]
 
             if init_onset_time == None:
-                init_state = th.zeros((batch_size, 88))
+                init_state = th.zeros((batch_size, 88), dtype=th.int64)
                 init_onset_time = th.zeros((batch_size, 88))
                 init_onset_vel = th.zeros((batch_size, 88))
-            last_onset_time = init_onset_time
-            last_onset_vel = init_onset_vel
-            last_state = init_state
+            last_state = init_state.to(device)
+            last_onset_time = init_onset_time.to(device)
+            last_onset_vel = init_onset_vel.to(device)
 
             context_enc = self.context_net(
-                last_state.view(batch_size, 1, 88).to(audio.device),
-                init_onset_time.view(batch_size, 1, 88, 1).to(audio.device),
-                init_onset_vel.view(batch_size, 1, 88, 1).to(audio.device))
-            frame = th.zeros((batch_size, step_len, 88, 5)).to(audio.device)
-            vel = th.zeros((batch_size, step_len, 88)).to(audio.device)
+                last_state.view(batch_size, 1, 88),
+                last_onset_time.view(batch_size, 1, 88, 1),
+                last_onset_vel.view(batch_size, 1, 88, 1))
+            frame = th.zeros((batch_size, step_len, 88, 5)).to(device)
+            vel = th.zeros((batch_size, step_len, 88)).to(device)
 
-            c = context_enc.squeeze(1)
+            c = context_enc[:,0:1]
             h, vel_h = None, None
             offset = 0
 
             for step in range(step_len):
                 if step in seg_edges:
                     offset = step
-                    if step == 0:
-                        conv_out, vel_conv_out = self.local_forward(
-                            audio[:, : (offset + max_step) * HOP + self.n_fft//2],
-                            unpad_end=True)
-                    elif step == seg_edges[-1]:  # last segment
-                        conv_out, vel_conv_out = self.local_forward(
-                            audio[:, offset * HOP - self.n_fft//2 : ],
-                            unpad_start=True)
+                    if step == 0:  # First segment
+                        unpad_start = False
+                        start = 0
                     else:
-                        conv_out, vel_conv_out = self.local_forward(
-                            audio[:, offset * HOP - self.n_fft//2: 
-                                (offset + max_step) * HOP + self.n_fft//2],
-                            unpad_start=True, unpad_end=True)
+                        del conv_out
+                        del vel_conv_out
+                        unpad_start = True
+                        start = offset * HOP - self.n_fft//2 
+
+                    if step == seg_edges[-1]:  # Last segment
+                        unpad_end = False
+                        end = None
+                    else:
+                        # margin for CNN
+                        end = (offset + max_step + 10) * HOP + self.n_fft//2
+                        unpad_end = True
+                    
+                    conv_out, vel_conv_out = self.local_forward(
+                        audio[:, start: end],
+                        unpad_start=unpad_start, unpad_end=unpad_end)
 
                 frame_out, vel_out, h, vel_h = self.recurrent_step(
                     conv_out[:, step - offset].unsqueeze(1), 
@@ -142,7 +148,7 @@ class ARModel(nn.Module):
                 last_onset_vel = cur_onset_vel 
                 context_enc = self.context_net(
                     arg_frame.view(batch_size, 1, 88).to(audio.device),
-                    last_onset_time.view(batch_size, 1, 88, 1).to(audio.device).div(313),
+                    last_onset_time.view(batch_size, 1, 88, 1).to(audio.device).div(156),
                     last_onset_vel.view(batch_size, 1, 88, 1).to(audio.device).div(128))
                 c = context_enc
 
