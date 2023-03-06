@@ -215,9 +215,11 @@ def valid_step(model, batch, loss_fn, device, config):
     shifted_vel = batch['velocity'].to(device)
     last_onset_time = batch['last_onset_time'].to(device)
     last_onset_vel = batch['last_onset_vel'].to(device)
+    # 'gt' sampling gives very poor results since some onsets are ignored, as the model doesn't
+    # have to make it.
     frame_out, vel_out = model(audio, shifted_label[:, :-1], 
                                 last_onset_time[:, :-1], last_onset_vel[:, :-1], 
-                                random_condition=False)
+                                random_condition=False, sampling='argmax')
     # frame out: B x T x 88 x C
     loss, vel_loss = loss_fn(frame_out, vel_out, shifted_label[:, 1:], shifted_vel[:, 1:])
     validation_metric = defaultdict(list)
@@ -255,9 +257,11 @@ def train(rank, world_size, run, config, ddp=True):
     np.random.seed(seed)
 
     model = ARModel(config).to(rank)
+    # debug
+    ckp = th.load('wandb/run-20230305_092058-hitx274v/files/model_10k_0.0011.pt')
+    model.load_state_dict(ckp['model_state_dict'])
     if rank == 0:
         summary(model)
-    # model = ToyModel().to(rank)
     if ddp:
         model = th.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         model = DDP(model, device_ids=[rank])
@@ -268,17 +272,9 @@ def train(rank, world_size, run, config, ddp=True):
     if rank == 0:
         run.watch(model, log_freq=100)
     save_dir = run.dir
-    if config.resume_id:
-        model_saver = ModelSaver(save_dir, config, resume=True)
-        ckp = th.load(model_saver.last_ckp)
-        opt = th.load(model_saver.last_ckp)
-        model.load_state_dict(
-            th.load(ckp['model_state_dict'], map_location={'cuda:0': f'cuda:{rank}'})) 
-        optimizer.load_state_dict(opt)
-        step = model_saver.last_step
-    else: 
-        model_saver = ModelSaver(save_dir, config)
-        step = 0
+    model_saver = ModelSaver(save_dir, config)
+    # step = 0
+    step = 10000
         
     scheduler = StepLR(optimizer, step_size=5000, gamma=0.95)
     train_set = get_dataset(config, ['train'], random_sample=True, transform=True)
@@ -316,9 +312,10 @@ def train(rank, world_size, run, config, ddp=True):
             if rank ==0: loop.update(1)
             step += 1
             model.train()
-            train_step(model, batch, loss_fn, optimizer, scheduler, device, rank, step, config, run)
+            # train_step(model, batch, loss_fn, optimizer, scheduler, device, rank, step, config, run)
 
-            if step % config.valid_interval == 0 or step == 5000:
+            # if step % config.valid_interval == 0 or step == 5000:
+            if True: # debug
                 model.eval()
 
                 validation_metric = defaultdict(list)
