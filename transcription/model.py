@@ -239,7 +239,6 @@ class ContextNet(nn.Module):
         return concat # B x T x out_dim x 88
 
 
-'''
 class FilmLayer(nn.Module):
     def __init__(self, n_f, channel, hidden=16):
         super().__init__()
@@ -335,7 +334,7 @@ class FilmBlock(nn.Module):
         res = alpha * res + beta
         x = F.relu(x + res)
         return x
-
+'''
 class PAR(nn.Module):
     def __init__(self, n_mels, cnn_unit, fc_unit, win_fw, win_bw, hidden_per_pitch):
         super().__init__()
@@ -476,9 +475,9 @@ class PC(nn.Module):
         self.large_conv_l1 = nn.Conv2d(cnn_unit, hidden_per_pitch, (1, f_size), padding=0)
         self.large_conv_l2 = nn.Conv2d(hidden_per_pitch, hidden_per_pitch, (1, f_size), padding=0)
         self.large_conv_l3 = nn.Conv2d(hidden_per_pitch, hidden_per_pitch, (1, f_size), padding=0)
-        self.film_1 = FilmLayer(n_mels//4, hidden=16)
-        self.film_2 = FilmLayer(n_mels//4, hidden=16)
-        self.film_3 = FilmLayer(n_mels//4, hidden=16)
+        self.film_1 = FilmLayer(n_mels//4, hidden_per_pitch, hidden=16)
+        self.film_2 = FilmLayer(n_mels//4, hidden_per_pitch, hidden=16)
+        self.film_3 = FilmLayer(n_mels//4, hidden_per_pitch, hidden=16)
 
         self.fc_1 = nn.Conv1d(hidden_per_pitch*88, hidden_per_pitch*88, 1, padding=0, groups=88)
         self.fc_2 = nn.Conv1d(hidden_per_pitch*88, hidden_per_pitch*88, 1, padding=0, groups=88)
