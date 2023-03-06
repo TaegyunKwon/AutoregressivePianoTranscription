@@ -101,11 +101,11 @@ class ModelSaver():
         if resume:
             with open(self.logdir / 'checkpoint.csv', "r") as f:
                 reader = csv.reader(f, delimiter=',')
-                self.top_n = [(el[0], float(el[1])) for el in list(reader)]
+                self.top_n = [(el[0], float(el[1]), int(el[2])) for el in list(reader)]
             self.best_ckp = self.top_n[0][0]
-            lastest = np.argmax([int(el[0].split('_')[1]) for el in self.top_n])
+            lastest = np.argmax([el[2] for el in self.top_n])
             self.last_ckp = self.top_n[lastest][0]
-            self.last_step = int(self.last_ckp.split('_')[0])
+            self.last_step = self.top_n[lastest][2]
             self.last_opt = self.save_name_opt(self.last_step)
 
     def save_model(self, model, save_name, ddp):
@@ -138,13 +138,13 @@ class ModelSaver():
     def write_csv(self):
         with open(self.logdir / 'checkpoint.csv', "w") as f:
             writer = csv.writer(f, delimiter=',')
-            writer.writerows([(el[0], el[1]) for el in self.top_n])
+            writer.writerows([(el[0], el[1], el[2]) for el in self.top_n])
     
     def update(self, model, optimizer, step, score, ddp):
         save_name = self.save_name(step, score)
         self.save_model(model, save_name, ddp)
         self.update_optim(optimizer, step)
-        self.top_n.append((save_name, score))
+        self.top_n.append((save_name, score, step))
         self.update_top_n()
         self.last_step = step
 
@@ -257,8 +257,11 @@ def train(rank, world_size, config, ddp=True):
 
     model = ARModel(config).to(rank)
     if config.resume_dir:
-        ckp = th.load('wandb/run-20230305_092058-hitx274v/files/model_10k_0.0011.pt')
+        model_saver = ModelSaver(config, resume=True, order='higher')
+        ckp = th.load(model_saver.logdir / model_saver.last_ckp)
         model.load_state_dict(ckp['model_state_dict'])
+    else:  
+        model_saver = ModelSaver(config, order='higher')
     if rank == 0:
         if config.resume_dir:
             # run = wandb.init('transcription', resume="allow", dir=config.logdir)
@@ -274,13 +277,12 @@ def train(rank, world_size, config, ddp=True):
                           eps=1e-16, betas=(0.9,0.999), weight_decouple=True, 
                           rectify = False, print_change_log=False)
     if config.resume_dir:
-        ckp_opt = th.load('wandb/run-20230305_092058-hitx274v/files/opt_10k.pt')
+        ckp_opt = th.load(model_saver.logdir / model_saver.last_opt)
         optimizer.load_state_dict(ckp_opt)
         
 
     if rank == 0:
         run.watch(model, log_freq=100)
-    model_saver = ModelSaver(config)
     step = 0
         
     scheduler = StepLR(optimizer, step_size=5000, gamma=0.95)
