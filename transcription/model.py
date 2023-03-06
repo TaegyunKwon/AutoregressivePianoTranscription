@@ -17,31 +17,43 @@ class ARModel(nn.Module):
         self.n_fft = config.n_fft
         self.hidden_per_pitch = config.hidden_per_pitch
         self.context_len = self.win_fw + self.win_bw + 1
+        self.pitchwise = config.pitchwise_lstm
 
         self.melspectrogram = transforms.MelSpectrogram(sample_rate=SR, n_fft=config.n_fft,
             hop_length=HOP, f_min=config.f_min, f_max=config.f_max, n_mels=config.n_mels, normalized=False)
 
         if self.model == 'PAR':
-            self.acoustic = SimpleConv2(config.n_mels, config.cnn_unit, config.fc_unit, 
-                                config.win_fw, config.win_bw, config.hidden_per_pitch)
-            self.vel_acoustic = SimpleConv2(config.n_mels, config.cnn_unit, config.fc_unit, 
-                                config.win_fw, config.win_bw, config.hidden_per_pitch)
+            self.acoustic = PAR(config.n_mels, config.cnn_unit, config.fc_unit, 
+                                config.win_fw, config.win_bw, config.hidden_per_pitch,
+                                use_film=config.film)
+            self.vel_acoustic = PAR(config.n_mels, config.cnn_unit, config.fc_unit, 
+                                config.win_fw, config.win_bw, config.hidden_per_pitch,
+                                use_film=config.film)
         elif self.model == 'PC':
             self.acoustic = PC(config.n_mels, config.cnn_unit,
-                                config.win_fw, config.win_bw, config.hidden_per_pitch)
+                                config.win_fw, config.win_bw, config.hidden_per_pitch,
+                                use_film=config.film)
             self.vel_acoustic = PC(config.n_mels, config.cnn_unit,
-                                config.win_fw, config.win_bw, config.hidden_per_pitch)
+                                config.win_fw, config.win_bw, config.hidden_per_pitch,
+                                use_film=config.film)
         else:
             raise KeyError(f'wrong model:{self.model}')
             
         # self.context_net = ContextNet(config.hidden_per_pitch, out_dim=4)
         self.context_net = ContextNetJoint(config.hidden_per_pitch, out_dim=4)
+        if config.pitchwise_lstm:
+            self.lstm = nn.LSTM(config.hidden_per_pitch+4, config.lstm_unit, num_layers=2, batch_first=False, bidirectional=False)
+            self.output = nn.Linear(config.lstm_unit, 5)
 
-        self.lstm = nn.LSTM(config.hidden_per_pitch+4, config.lstm_unit, num_layers=2, batch_first=False, bidirectional=False)
-        self.output = nn.Linear(config.lstm_unit, 5)
+            self.vel_lstm = nn.LSTM(config.hidden_per_pitch*2+4, config.lstm_unit, num_layers=2, batch_first=False, bidirectional=False)
+            self.vel_output = nn.Linear(config.lstm_unit, 1)
+        else:
+            self.lstm = nn.LSTM((config.hidden_per_pitch+4)*88, config.lstm_unit, num_layers=2, batch_first=False, bidirectional=False)
+            self.output = nn.Linear(config.lstm_unit, 88*5)
 
-        self.vel_lstm = nn.LSTM(config.hidden_per_pitch*2+4, config.lstm_unit, num_layers=2, batch_first=False, bidirectional=False)
-        self.vel_output = nn.Linear(config.lstm_unit, 1)
+            self.vel_lstm = nn.LSTM((config.hidden_per_pitch*2+4)*88, config.lstm_unit, num_layers=2, batch_first=False, bidirectional=False)
+            self.vel_output = nn.Linear(config.lstm_unit, 88)
+            
 
     def forward(self, audio, last_states=None, last_onset_time=None, last_onset_vel=None, 
                 init_state=None, init_onset_time=None, init_onset_vel=None, sampling='gt', 
@@ -58,16 +70,22 @@ class ARModel(nn.Module):
                                            last_onset_time.unsqueeze(-1), 
                                            last_onset_vel.unsqueeze(-1)) # B x T x out_dim x 88
             concat = th.cat((context_enc, conv_out), dim=2).\
-                permute(1, 0, 3, 2).\
-                    reshape(n_frame, batch_size*88, self.hidden_per_pitch+4)
+                permute(1, 0, 3, 2)
+            if self.pitchwise:
+                concat = concat.reshape(n_frame, batch_size*88, self.hidden_per_pitch+4)
+            else:
+                concat = concat.reshape(n_frame, batch_size, (self.hidden_per_pitch+4)*88)
             self.lstm.flatten_parameters()
             lstm_out, lstm_hidden = self.lstm(concat) # hidden_per_pitch
             frame_out = self.output(lstm_out) # n_frame, B*88 x n_class
             frame_out = frame_out.view(n_frame, batch_size, 88, 5).permute(1, 0, 2, 3) # B x n_frame x 88 x n_class
 
             vel_concat = th.cat((context_enc, conv_out.detach(), vel_conv_out), dim=2).\
-                permute(1, 0, 3, 2).\
-                    reshape(n_frame, batch_size*88, self.hidden_per_pitch*2+4)
+                permute(1, 0, 3, 2)
+            if self.pitchwise:
+                vel_concat = vel_concat.reshape(n_frame, batch_size*88, self.hidden_per_pitch*2+4)
+            else:
+                vel_concat = vel_concat.reshape(n_frame, batch_size, (self.hidden_per_pitch*2+4)*88)
             self.vel_lstm.flatten_parameters()
             vel_lstm_out, vel_lstm_hidden = self.vel_lstm(vel_concat) # hidden_per_pitch
             vel_out = self.vel_output(vel_lstm_out) # n_frame, B*88 x 1
@@ -174,18 +192,22 @@ class ARModel(nn.Module):
         batch_size = z.shape[0]
         n_frame = 1
 
-        concat = th.cat((c, z), 2).\
-                permute(1, 0, 3, 2).\
-                    reshape(n_frame, batch_size*88, self.hidden_per_pitch+4)
+        concat = th.cat((c, z), 2).permute(1, 0, 3, 2)
+        if self.pitchwise:
+            concat = concat.reshape(n_frame, batch_size*88, self.hidden_per_pitch+4)
+        else:
+            concat = concat.reshape(n_frame, batch_size, (self.hidden_per_pitch+4)*88)
 
         self.lstm.flatten_parameters()
         lstm_out, lstm_hidden = self.lstm(concat, h) # hidden_per_pitch
         frame_out = self.output(lstm_out) # n_frame, B*88 x n_class
         frame_out = frame_out.view(n_frame, batch_size, 88, 5).permute(1, 0, 2, 3) # B x n_frame x 88 x n_class
 
-        vel_concat = th.cat((c, z, vel_z), dim=2).\
-                        permute(1, 0, 3, 2).\
-                            reshape(n_frame, batch_size*88, self.hidden_per_pitch*2+4)
+        vel_concat = th.cat((c, z, vel_z), dim=2).permute(1, 0, 3, 2)
+        if self.pitchwise:
+            vel_concat = vel_concat.reshape(n_frame, batch_size*88, self.hidden_per_pitch*2+4)
+        else:
+            vel_concat = vel_concat.reshape(n_frame, batch_size, (self.hidden_per_pitch*2+4)*88)
         self.vel_lstm.flatten_parameters()
         vel_lstm_out, vel_lstm_hidden = self.vel_lstm(vel_concat, vel_h) # hidden_per_pitch
         vel_out = self.vel_output(vel_lstm_out) # n_frame, B*88 x 1
@@ -280,21 +302,31 @@ class FilmLayer(nn.Module):
 
 
 class FilmBlock(nn.Module):
-    def __init__(self, n_input, n_unit, n_f, hidden=16):
+    def __init__(self, n_input, n_unit, n_f, hidden=16, use_film=True):
         super().__init__()
         self.conv1 = nn.Conv2d(n_input, n_unit, (3, 3), padding=1)
         self.conv2 = nn.Conv2d(n_unit, n_unit, (3, 3), padding=1)
         self.bn = nn.BatchNorm2d(n_unit)
-        self.film = FilmLayer(n_f, n_unit, hidden=hidden)
+        self.use_film = use_film
+        if use_film:
+            self.film = FilmLayer(n_f, n_unit, hidden=hidden)
 
     def forward(self, x):
-        # x : shape of B C F L
-        x = F.relu(self.conv1(x))
-        res = self.conv2(x)
-        res = self.bn(res) 
-        res = self.film(res.transpose(2,3)).transpose(2,3)
-        x = F.relu(x + res)
-        return x
+        if self.use_film:
+            # x : shape of B C F L
+            x = F.relu(self.conv1(x))
+            x = self.film(x.transpose(2,3)).transpose(2,3)
+            res = self.conv2(x)
+            res = self.bn(res) 
+            res = self.film(res.transpose(2,3)).transpose(2,3)
+            x = F.relu(x + res)
+            return x
+        else:
+            x = F.relu(self.conv1(x))
+            res = self.conv2(x)
+            res = self.bn(res) 
+            x = F.relu(x + res)
+            return x
 '''
 
 class FilmBlock(nn.Module):
@@ -340,7 +372,6 @@ class FilmBlock(nn.Module):
         res = alpha * res + beta
         x = F.relu(x + res)
         return x
-'''
 class PAR(nn.Module):
     def __init__(self, n_mels, cnn_unit, fc_unit, win_fw, win_bw, hidden_per_pitch):
         super().__init__()
@@ -380,11 +411,7 @@ class PAR(nn.Module):
         x = self.cnn(x)  # B C F T
         fc_x = self.fc(x.permute(0, 3, 1, 2).flatten(-2)) # B L C
         fc_x = fc_x.transpose(1,2)  # B C T
-        '''
-        fc_x = F.pad(fc_x, (self.win_bw, self.win_fw))
-        fc_x = self.win_fc(fc_x).view(batch_size, self.hidden_per_pitch, 88, -1)
-        fc_x = fc_x.permute(0, 3, 1, 2) # B T C 88
-        '''
+
         fc_x = F.pad(fc_x, (self.win_bw, self.win_fw)).unsqueeze(3)
         fc_x = F.unfold(fc_x, (self.win_bw + self.win_fw + 1, 1)) 
         fc_x = self.win_fc(fc_x.transpose(1,2))  # B L C
@@ -402,11 +429,12 @@ class PAR(nn.Module):
 
         x = th.cat((x, fc_x), -2)
         return F.relu(x)
+'''
 
 
-class SimpleConv2(nn.Module):
+class PAR(nn.Module):
     # SimpleConv without Pitchwise Conv
-    def __init__(self, n_mels, cnn_unit, fc_unit, win_fw, win_bw, hidden_per_pitch):
+    def __init__(self, n_mels, cnn_unit, fc_unit, win_fw, win_bw, hidden_per_pitch, use_film):
         super().__init__()
 
         self.win_fw = win_fw
@@ -414,12 +442,12 @@ class SimpleConv2(nn.Module):
         self.hidden_per_pitch = hidden_per_pitch
         # input is batch_size * 1 channel * frames * 700
         self.cnn = nn.Sequential(
-            FilmBlock(1, cnn_unit, n_mels),
+            FilmBlock(1, cnn_unit, n_mels, use_film=use_film),
             nn.MaxPool2d((2, 1)),
             nn.Dropout(0.25),
-            FilmBlock(cnn_unit, cnn_unit, n_mels//2),
+            FilmBlock(cnn_unit, cnn_unit, n_mels//2, use_film=use_film),
             nn.MaxPool2d((2, 1)),
-            FilmBlock(cnn_unit, cnn_unit, n_mels//4),
+            FilmBlock(cnn_unit, cnn_unit, n_mels//4, use_film=use_film),
             nn.Dropout(0.25),
         )
 
@@ -449,7 +477,7 @@ class SimpleConv2(nn.Module):
     
     
 class PC(nn.Module):
-    def __init__(self, n_mels, cnn_unit, win_fw, win_bw, hidden_per_pitch):
+    def __init__(self, n_mels, cnn_unit, win_fw, win_bw, hidden_per_pitch, use_film=True):
         super().__init__()
 
         self.n_mels = n_mels
@@ -458,32 +486,52 @@ class PC(nn.Module):
         self.win_fw = win_fw
 
         # input is batch_size * 1 channel * frames * input_features
-        self.cnn = nn.Sequential(
-            # layer 0
-            nn.Conv2d(1, cnn_unit, (7, 7), padding=3),
-            nn.BatchNorm2d(cnn_unit),
-            # FilmLayer(n_mels, hidden=16),
-            nn.ReLU(),
-            nn.MaxPool2d((1, 4)),
+        self.use_film = use_film
+        if use_film:
+            self.cnn = nn.Sequential(
+                # layer 0
+                nn.Conv2d(1, cnn_unit, (7, 7), padding=3),
+                nn.BatchNorm2d(cnn_unit),
+                FilmLayer(n_mels, cnn_unit, hidden=16),
+                nn.ReLU(),
+                nn.MaxPool2d((1, 4)),
 
-            nn.Dropout(0.25),
+                nn.Dropout(0.25),
 
-            nn.Conv2d(cnn_unit, cnn_unit, (3, 1), padding=(1,0)),
-            nn.BatchNorm2d(cnn_unit),
-            # FilmLayer(n_mels//4, hidden=16),
-            nn.ReLU(),
-            nn.Conv2d(cnn_unit, cnn_unit, (3, 1), padding=(1,0)),
-            nn.BatchNorm2d(cnn_unit),
-            # FilmLayer(n_mels//4, hidden=16),
-            nn.ReLU(),
-        )
+                nn.Conv2d(cnn_unit, cnn_unit, (3, 1), padding=(1,0)),
+                nn.BatchNorm2d(cnn_unit),
+                FilmLayer(n_mels//4, cnn_unit, hidden=16),
+                nn.ReLU(),
+                nn.Conv2d(cnn_unit, cnn_unit, (3, 1), padding=(1,0)),
+                nn.BatchNorm2d(cnn_unit),
+                FilmLayer(n_mels//4, cnn_unit, hidden=16),
+                nn.ReLU(),
+            )
+        else:
+            self.cnn = nn.Sequential(
+                # layer 0
+                nn.Conv2d(1, cnn_unit, (7, 7), padding=3),
+                nn.BatchNorm2d(cnn_unit),
+                nn.ReLU(),
+                nn.MaxPool2d((1, 4)),
+
+                nn.Dropout(0.25),
+
+                nn.Conv2d(cnn_unit, cnn_unit, (3, 1), padding=(1,0)),
+                nn.BatchNorm2d(cnn_unit),
+                nn.ReLU(),
+                nn.Conv2d(cnn_unit, cnn_unit, (3, 1), padding=(1,0)),
+                nn.BatchNorm2d(cnn_unit),
+                nn.ReLU(),
+            )
         f_size = 40 
         self.large_conv_l1 = nn.Conv2d(cnn_unit, hidden_per_pitch, (1, f_size), padding=0)
         self.large_conv_l2 = nn.Conv2d(hidden_per_pitch, hidden_per_pitch, (1, f_size), padding=0)
         self.large_conv_l3 = nn.Conv2d(hidden_per_pitch, hidden_per_pitch, (1, f_size), padding=0)
-        self.film_1 = FilmLayer(n_mels//4, hidden_per_pitch, hidden=16)
-        self.film_2 = FilmLayer(n_mels//4, hidden_per_pitch, hidden=16)
-        self.film_3 = FilmLayer(n_mels//4, hidden_per_pitch, hidden=16)
+        if use_film:
+            self.film_1 = FilmLayer(n_mels//4, hidden_per_pitch, hidden=16)
+            self.film_2 = FilmLayer(n_mels//4, hidden_per_pitch, hidden=16)
+            self.film_3 = FilmLayer(n_mels//4, hidden_per_pitch, hidden=16)
 
         self.fc_1 = nn.Conv1d(hidden_per_pitch*88, hidden_per_pitch*88, 1, padding=0, groups=88)
         self.fc_2 = nn.Conv1d(hidden_per_pitch*88, hidden_per_pitch*88, 1, padding=0, groups=88)
@@ -495,16 +543,27 @@ class PC(nn.Module):
         )
 
     def forward(self, mel):
-        x = mel.unsqueeze(1)
-        batch_size = x.shape[0]
-        x = self.cnn(x) # (B x H x L x n_mels/4)
-        x = self.large_conv_l1(F.pad(x, (0,39)))
-        x = F.relu(self.film_1(x))
-        x = self.large_conv_l2(F.pad(x, (0,39)))
-        x = F.relu(self.film_2(x))
-        x = self.large_conv_l3(F.pad(x, (0,39)))
-        x = F.relu(self.film_3(x))[:,:,:,:88]
-
+        if self.use_film:
+            x = mel.unsqueeze(1)
+            batch_size = x.shape[0]
+            x = self.cnn(x) # (B x H x L x n_mels/4)
+            x = self.large_conv_l1(F.pad(x, (0,39)))
+            x = F.relu(self.film_1(x))
+            x = self.large_conv_l2(F.pad(x, (0,39)))
+            x = F.relu(self.film_2(x))
+            x = self.large_conv_l3(F.pad(x, (0,39)))
+            x = F.relu(self.film_3(x))[:,:,:,:88]
+        else:
+            x = mel.unsqueeze(1)
+            batch_size = x.shape[0]
+            x = self.cnn(x) # (B x H x L x n_mels/4)
+            x = self.large_conv_l1(F.pad(x, (0,39)))
+            x = F.relu(x)
+            x = self.large_conv_l2(F.pad(x, (0,39)))
+            x = F.relu(x)
+            x = self.large_conv_l3(F.pad(x, (0,39)))
+            x = F.relu(x)[:,:,:,:88]
+            
         x = x.transpose(2,3).reshape(batch_size, self.hidden_per_pitch*88, -1)
         x = self.fc_1(x)  # B x 1 x L x n_mels/4
         res = self.fc_2(F.relu(x))

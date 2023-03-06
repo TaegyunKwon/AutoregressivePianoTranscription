@@ -1,0 +1,8 @@
+{
+    "model": "PC",
+    "cnn_unit": 48,
+    "lstm_unit": 48,
+    "hidden_per_pitch": 48,
+    "dataset": "MAESTRO_V1"
+
+}

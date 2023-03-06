@@ -1,0 +1,9 @@
+{
+    "noisy_condition": "True",
+    "win_fw": 4,
+    "win_bw": 0,
+    "pitchwise_lstm": "True",
+    "film": "True",
+    "dataset": "MAESTRO_V1"
+
+}

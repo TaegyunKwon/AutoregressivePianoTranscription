@@ -42,7 +42,7 @@ def remove_progress(captured_out):
     return '\n'.join(lines)
 
 default_dict = dict(
-    n_mels=704,
+    n_mels=700,
     n_fft=4096,
     f_min=27.5,
     f_max=8000,
@@ -51,6 +51,8 @@ default_dict = dict(
     hidden_per_pitch=48,
     fc_unit=768,
     batch_size=12,
+    pitchwise_lstm=True,
+    film=True,
     win_fw=4,
     win_bw=0,
     model='PAR',
@@ -59,7 +61,7 @@ default_dict = dict(
     n_workers=4,
     lr=1e-3,
     n_epoch = 100,
-    random_condition=True,
+    noisy_condition=True,
     valid_interval=10000,
     valid_seq_len=716800,
     debug=False,
@@ -187,7 +189,7 @@ def train_step(model, batch, loss_fn, optimizer, scheduler, device, config):
     last_onset_vel = batch['last_onset_vel'].to(device)
     frame_out, vel_out = model(audio, shifted_label[:, :-1], 
                                 last_onset_time[:, :-1], last_onset_vel[:, :-1], 
-                                random_condition=config.random_condition)
+                                random_condition=config.noisy_condition)
     # frame out: B x T x 88 x 5
     loss, vel_loss = loss_fn(frame_out, vel_out, shifted_label[:, 1:], shifted_vel[:, 1:])
     total_loss = loss.mean() + vel_loss.mean()
@@ -287,7 +289,7 @@ def train(rank, world_size, config, ddp=True):
         
     scheduler = StepLR(optimizer, step_size=5000, gamma=0.95)
     train_set = get_dataset(config, ['train'], sample_len=config.seq_len, 
-                            random_sample=True, transform=True)
+                            random_sample=True, transform=config.noisy_condition)
     valid_set = get_dataset(config, ['validation'], sample_len=config.valid_seq_len,
                             random_sample=False, transform=False)
     if ddp:
@@ -383,6 +385,8 @@ def train(rank, world_size, config, ddp=True):
         test_sampler = iter(target_segments)
     else:
         test_sampler = None
+    if config.debug:
+        test_sampler = iter([rank])
     data_loader_test = DataLoader(
         test_set, batch_sampler=test_sampler,
         num_workers=config.n_workers,
@@ -455,12 +459,12 @@ def run_demo(demo_fn, world_size, config):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=Path)
-    parser.add_argument('--model', type=str, default='PAR')
-    parser.add_argument('--dataset', type=str, default='MAESTRO_V3')
-    parser.add_argument('-b', '--batch_size', type=int, default=12)
-    parser.add_argument('-c', '--cnn_unit', type=int, default=48)
-    parser.add_argument('-l', '--lstm_unit', type=int, default=48)
-    parser.add_argument('-p', '--hidden_per_pitch', type=int, default=48)
+    parser.add_argument('--model', type=str)
+    parser.add_argument('--dataset', type=str)
+    parser.add_argument('-b', '--batch_size', type=int)
+    parser.add_argument('-c', '--cnn_unit', type=int)
+    parser.add_argument('-l', '--lstm_unit', type=int)
+    parser.add_argument('-p', '--hidden_per_pitch', type=int)
     parser.add_argument('-n', '--name', type=str)
     parser.add_argument('-d', '--debug', action='store_true')
     parser.add_argument('--resume_dir', type=Path)
@@ -471,9 +475,13 @@ if __name__ == '__main__':
     args = parser.parse_args()
     config = default_dict
     if args.config:
-        update_config = json.loads(args.config)
+        with open(args.config, 'r') as j:
+            update_config = json.load(j)
+        print(update_config)
         config.update(update_config)
-    config.update(vars(args))
+    for k, v in vars(args).items():
+        if v is not None:
+            config.update({k:v})
     config = SimpleNamespace(**config)
     if config.debug:
         config.valid_interval=10
@@ -489,8 +497,12 @@ if __name__ == '__main__':
         id = wandb.util.generate_id()
         config.id = id
         print(f'init:{id}')
-        config.logdir = Path('runs') / \
-        ('_'.join([config.model, datetime.now().strftime('%y%m%d-%H%M%S'), id]))
+        if config.name:
+            config.logdir = Path('runs') / \
+            ('_'.join([config.model, datetime.now().strftime('%y%m%d-%H%M%S'), config.name]))
+        else:
+            config.logdir = Path('runs') / \
+            ('_'.join([config.model, datetime.now().strftime('%y%m%d-%H%M%S'), id]))
         Path(config.logdir).mkdir(exist_ok=True)
     print(config)
 
