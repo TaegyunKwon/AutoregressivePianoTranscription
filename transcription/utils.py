@@ -1,6 +1,7 @@
 import sys
 from functools import reduce
 from torch.nn.modules.module import _addindent
+from torch.utils.data.sampler import Sampler
 
 def summary(model, file=sys.stdout):
     def repr(model):
@@ -48,3 +49,14 @@ def summary(model, file=sys.stdout):
     '''
     print(string)
     return count
+
+class CustomSampler(Sampler):
+    def __init__(self, indexes):
+        self.indexes = indexes
+        self.n_batch = len(indexes)
+
+    def __iter__(self):
+        return iter(self.indexes)
+
+    def __len__(self):
+        return self.n_batch

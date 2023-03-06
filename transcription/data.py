@@ -146,6 +146,20 @@ class PianoSampleDataset(Dataset):
 
         return result
 
+    def sort_by_length(self):
+        step_lens = []
+        for n in range(len(self)):
+            audio_path = self.data_path[n][0]
+            saved_data_path = audio_path.replace('.flac', '_parsed.pt').replace('.wav', '_parsed.pt')
+            data = th.load(saved_data_path)
+            sample_len = data['label'].shape[0]
+            step_lens.append(sample_len)
+        self.data_path = [x for _, x in sorted(zip(step_lens, self.data_path),
+                          key=lambda pair: pair[0], reverse=True)]
+        
+
+
+
     def __len__(self):
         return len(self.data_path)
 

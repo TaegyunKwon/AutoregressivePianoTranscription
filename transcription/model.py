@@ -18,8 +18,6 @@ class ARModel(nn.Module):
         self.hidden_per_pitch = config.hidden_per_pitch
         self.context_len = self.win_fw + self.win_bw + 1
 
-
-        # self.cqt = CQT(21, 8000, 4, 1, perceptual_w)
         self.melspectrogram = transforms.MelSpectrogram(sample_rate=SR, n_fft=config.n_fft,
             hop_length=HOP, f_min=config.f_min, f_max=config.f_max, n_mels=config.n_mels, normalized=False)
 
@@ -117,6 +115,8 @@ class ARModel(nn.Module):
                         unpad_start = False
                         start = 0
                     else:
+                        del conv_out
+                        del vel_conv_out
                         unpad_start = True
                         start = offset * HOP - self.n_fft//2 
 
