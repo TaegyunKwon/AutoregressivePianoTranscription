@@ -1,9 +1,9 @@
 {
-    "noisy_condition": "True",
+    "noisy_condition": true,
     "win_fw": 4,
     "win_bw": 0,
-    "pitchwise_lstm": "False",
+    "pitchwise_lstm": false,
     "lstm_unit": 256,
-    "film": "True"
+    "film": true 
 
 }

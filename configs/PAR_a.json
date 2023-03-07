@@ -4,6 +4,6 @@
     "win_bw": 0,
     "pitchwise_lstm": false,
     "lstm_unit": 256,
-    "film": true
+    "film": false
 
 }

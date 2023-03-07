@@ -148,6 +148,7 @@ class ModelSaver():
         self.update_optim(optimizer, step)
         self.top_n.append((save_name, score, step))
         self.update_top_n()
+        self.write_csv()
         self.last_step = step
 
     def update_top_n(self): 
@@ -262,8 +263,10 @@ def train(rank, world_size, config, ddp=True):
         model_saver = ModelSaver(config, resume=True, order='higher')
         ckp = th.load(model_saver.logdir / model_saver.last_ckp)
         model.load_state_dict(ckp['model_state_dict'])
+        step = model_saver.last_step
     else:  
         model_saver = ModelSaver(config, order='higher')
+        step = 0
     if rank == 0:
         if config.resume_dir:
             # run = wandb.init('transcription', resume="allow", dir=config.logdir)
@@ -285,7 +288,6 @@ def train(rank, world_size, config, ddp=True):
 
     if rank == 0:
         run.watch(model, log_freq=100)
-    step = 0
         
     scheduler = StepLR(optimizer, step_size=5000, gamma=0.95)
     train_set = get_dataset(config, ['train'], sample_len=config.seq_len, 
@@ -373,7 +375,12 @@ def train(rank, world_size, config, ddp=True):
 
     # Test phase
     model.eval()
-    SAVE_PATH = 'runs/test'
+    SAVE_PATH = config.logdir / (Path(model_saver.best_ckp).stem + f'_eval_{config.dataset}')
+    SAVE_PATH.mkdir(exist_ok=True)
+    map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+    ckp = th.load(model_saver.logdir / model_saver.best_ckp, map_location=map_location)
+    model.module.load_state_dict(ckp['model_state_dict'])
+    
     test_set = get_dataset(config, ['test'], sample_len=None,
                             random_sample=False, transform=False)
     # test_set.sort_by_length()

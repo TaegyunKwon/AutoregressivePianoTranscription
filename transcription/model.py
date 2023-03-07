@@ -63,29 +63,35 @@ class ARModel(nn.Module):
             conv_out, vel_conv_out = self.local_forward(audio)  # B x T x hidden x 88
             n_frame = conv_out.shape[1] 
 
+            # print(f'conv_out:{conv_out.shape}')
             if random_condition:
                 last_states = random_modification(last_states, 0.1)
 
             context_enc = self.context_net(last_states, 
                                            last_onset_time.unsqueeze(-1), 
                                            last_onset_vel.unsqueeze(-1)) # B x T x out_dim x 88
-            concat = th.cat((context_enc, conv_out), dim=2).\
-                permute(1, 0, 3, 2)
+
+            # print(f'context:{context_enc.shape}')
             if self.pitchwise:
-                concat = concat.reshape(n_frame, batch_size*88, self.hidden_per_pitch+4)
+                concat = th.cat((context_enc, conv_out), dim=2).\
+                    permute(1, 0, 3, 2).reshape(n_frame, batch_size*88, self.hidden_per_pitch+4)
             else:
-                concat = concat.reshape(n_frame, batch_size, (self.hidden_per_pitch+4)*88)
+                concat = th.cat((context_enc, conv_out), dim=2).\
+                    permute(1, 0, 3, 2).reshape(n_frame, batch_size, (self.hidden_per_pitch+4)*88)
             self.lstm.flatten_parameters()
+            # print(f'concat:{concat.shape}')
             lstm_out, lstm_hidden = self.lstm(concat) # hidden_per_pitch
+            # print(f'lstm:{lstm_out.shape}')
             frame_out = self.output(lstm_out) # n_frame, B*88 x n_class
+            # print(f'frame_out:{frame_out.shape}')
             frame_out = frame_out.view(n_frame, batch_size, 88, 5).permute(1, 0, 2, 3) # B x n_frame x 88 x n_class
 
-            vel_concat = th.cat((context_enc, conv_out.detach(), vel_conv_out), dim=2).\
-                permute(1, 0, 3, 2)
             if self.pitchwise:
-                vel_concat = vel_concat.reshape(n_frame, batch_size*88, self.hidden_per_pitch*2+4)
+                vel_concat = th.cat((context_enc, conv_out.detach(), vel_conv_out), dim=2).\
+                    permute(1, 0, 3, 2).reshape(n_frame, batch_size*88, self.hidden_per_pitch*2+4)
             else:
-                vel_concat = vel_concat.reshape(n_frame, batch_size, (self.hidden_per_pitch*2+4)*88)
+                vel_concat = th.cat((context_enc, conv_out.detach(), vel_conv_out), dim=2).\
+                    permute(1, 0, 3, 2).reshape(n_frame, batch_size, (self.hidden_per_pitch*2+4)*88)
             self.vel_lstm.flatten_parameters()
             vel_lstm_out, vel_lstm_hidden = self.vel_lstm(vel_concat) # hidden_per_pitch
             vel_out = self.vel_output(vel_lstm_out) # n_frame, B*88 x 1
@@ -192,11 +198,10 @@ class ARModel(nn.Module):
         batch_size = z.shape[0]
         n_frame = 1
 
-        concat = th.cat((c, z), 2).permute(1, 0, 3, 2)
         if self.pitchwise:
-            concat = concat.reshape(n_frame, batch_size*88, self.hidden_per_pitch+4)
+            concat = th.cat((c, z), 2).permute(1, 0, 3, 2).reshape(n_frame, batch_size*88, self.hidden_per_pitch+4)
         else:
-            concat = concat.reshape(n_frame, batch_size, (self.hidden_per_pitch+4)*88)
+            concat = th.cat((c, z), 2).permute(1, 0, 3, 2).reshape(n_frame, batch_size, (self.hidden_per_pitch+4)*88)
 
         self.lstm.flatten_parameters()
         lstm_out, lstm_hidden = self.lstm(concat, h) # hidden_per_pitch
