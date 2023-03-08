@@ -232,12 +232,10 @@ def test_step(model, batch, device):
     frame_outs = [] 
     vel_outs = []
     test_metric = defaultdict(list)
-    print(batch['step_len'])
     for n in range(audio.shape[0]):
         step_len = batch['step_len'][n]
         frame = frame_out[n][:step_len].detach().cpu()
         vel = vel_out[n][:step_len].detach().cpu()
-        print(batch['label'][n].shape, frame.shape, step_len)
         frame_outs.append(frame)
         vel_outs.append(vel)
         sample = frame.argmax(dim=-1)
@@ -480,6 +478,7 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--debug', action='store_true')
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--resume_dir', type=Path)
+    parser.add_argument('--resume_id', type=str)
     parser.add_argument('--ddp', action='store_true')
     parser.add_argument('--no-ddp', dest='ddp', action='store_false')
     parser.set_defaults(ddp=True)
@@ -502,8 +501,7 @@ if __name__ == '__main__':
         config.iteration=100
 
     if args.resume_dir:
-        id = Path(args.resume_dir).name.split('_')[-1]
-        config.id=id
+        id = args.resume_id
         print(f'resume:{id}')
         config.logdir = args.resume_dir
     else:
