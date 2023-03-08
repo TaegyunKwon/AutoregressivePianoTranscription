@@ -232,15 +232,17 @@ def test_step(model, batch, device):
     frame_outs = [] 
     vel_outs = []
     test_metric = defaultdict(list)
+    print(batch['step_len'])
     for n in range(audio.shape[0]):
         step_len = batch['step_len'][n]
-        frame = frame_out[n][:step_len]
-        vel = vel_out[n][:step_len]
+        frame = frame_out[n][:step_len].detach().cpu()
+        vel = vel_out[n][:step_len].detach().cpu()
+        print(batch['label'][n].shape, frame.shape, step_len)
         frame_outs.append(frame)
         vel_outs.append(vel)
         sample = frame.argmax(dim=-1)
-        metrics = evaluate(sample, batch['label'][n][1:].to(device),
-                           vel, batch['velocity'][n][1:].to(device))
+        metrics = evaluate(sample, batch['label'][n].detach().cpu()[1:],
+                           vel, batch['velocity'][n].detach().cpu()[1:])
         for k, v in metrics.items():
             test_metric[k].append(v)
     
@@ -288,7 +290,7 @@ def train(rank, world_size, config, ddp=True):
 
     if rank == 0:
         run.watch(model, log_freq=100)
-        
+
     scheduler = StepLR(optimizer, step_size=5000, gamma=0.95)
     train_set = get_dataset(config, ['train'], sample_len=config.seq_len, 
                             random_sample=True, transform=config.noisy_condition)
@@ -319,6 +321,8 @@ def train(rank, world_size, config, ddp=True):
 
     loss_fn = Losses()
 
+    if config.eval:
+        step = 1000000
     if rank == 0: loop = tqdm(range(step, config.iteration), total=config.iteration, initial=step)
     for epoch in range(10000):
         if ddp:
@@ -326,6 +330,8 @@ def train(rank, world_size, config, ddp=True):
         for batch in data_loader_train:
             if rank ==0: loop.update(1)
             step += 1
+            if step > config.iteration:
+                break
             model.train()
             loss, vel_loss = train_step(model, batch, loss_fn, optimizer, scheduler, device, config)
             if rank == 0:
@@ -368,9 +374,7 @@ def train(rank, world_size, config, ddp=True):
                     model_saver.update(model, optimizer, step, valid_mean['metric/note/f1'], ddp=ddp)
                 if ddp:
                     dist.barrier()
-            if step >= config.iteration:
-                break
-        if step >= config.iteration:
+        if step > config.iteration:
             break
 
     # Test phase
@@ -383,7 +387,7 @@ def train(rank, world_size, config, ddp=True):
     
     test_set = get_dataset(config, ['test'], sample_len=None,
                             random_sample=False, transform=False)
-    # test_set.sort_by_length()
+    test_set.sort_by_length()
     batch_size = 6 # 6 for PAR model, 12G RAM (8 blocked by 8G shm size)
     if ddp:
         segments = np.split(np.arange(len(test_set)),
@@ -474,10 +478,12 @@ if __name__ == '__main__':
     parser.add_argument('-p', '--hidden_per_pitch', type=int)
     parser.add_argument('-n', '--name', type=str)
     parser.add_argument('-d', '--debug', action='store_true')
+    parser.add_argument('--eval', action='store_true')
     parser.add_argument('--resume_dir', type=Path)
     parser.add_argument('--ddp', action='store_true')
     parser.add_argument('--no-ddp', dest='ddp', action='store_false')
     parser.set_defaults(ddp=True)
+    parser.set_defaults(eval=False)
     
     args = parser.parse_args()
     config = default_dict
