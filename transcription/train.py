@@ -261,8 +261,6 @@ def train(rank, world_size, config, ddp=True):
     model = ARModel(config).to(rank)
     if config.resume_dir:
         model_saver = ModelSaver(config, resume=True, order='higher')
-        ckp = th.load(model_saver.logdir / model_saver.last_ckp)
-        model.load_state_dict(ckp['model_state_dict'])
         step = model_saver.last_step
     else:  
         model_saver = ModelSaver(config, order='higher')
@@ -282,8 +280,11 @@ def train(rank, world_size, config, ddp=True):
                           eps=1e-16, betas=(0.9,0.999), weight_decouple=True, 
                           rectify = False, print_change_log=False)
     if config.resume_dir:
+        ckp = th.load(model_saver.logdir / model_saver.last_ckp)
+        model.module.load_state_dict(ckp['model_state_dict'])
         ckp_opt = th.load(model_saver.logdir / model_saver.last_opt)
         optimizer.load_state_dict(ckp_opt)
+        del ckp, ckp_opt
         
 
     if rank == 0:
@@ -502,6 +503,7 @@ if __name__ == '__main__':
 
     if args.resume_dir:
         id = args.resume_id
+        config.id=id
         print(f'resume:{id}')
         config.logdir = args.resume_dir
     else:
