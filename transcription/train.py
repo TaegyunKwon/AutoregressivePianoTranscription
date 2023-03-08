@@ -28,7 +28,7 @@ import wandb
 from adabelief_pytorch import AdaBelief
 
 from .model import ARModel
-from .data import MAESTRO_V3
+from .data import MAESTRO_V3, MAESTRO
 from .loss import FocalLoss
 from .evaluate import evaluate
 from .utils import summary, CustomSampler
@@ -85,6 +85,9 @@ def cleanup():
 def get_dataset(config, split, sample_len=160256, random_sample=False, transform=False):
     if config.dataset == 'MAESTRO_V3':
         return MAESTRO_V3(groups=split, sequence_length=sample_len, 
+                          random_sample=random_sample, transform=transform)
+    elif config.dataset == 'MAESTRO_V1':
+        return MAESTRO(groups=split, sequence_length=sample_len, 
                           random_sample=random_sample, transform=transform)
 
 class ModelSaver():
