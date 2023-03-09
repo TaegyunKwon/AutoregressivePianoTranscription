@@ -328,10 +328,10 @@ def train(rank, world_size, config, ddp=True):
         if ddp:
             data_loader_train.sampler.set_epoch(epoch)
         for batch in data_loader_train:
-            if rank ==0: loop.update(1)
             step += 1
             if step > config.iteration:
                 break
+            if rank ==0: loop.update(1)
             model.train()
             loss, vel_loss = train_step(model, batch, loss_fn, optimizer, scheduler, device, config)
             if rank == 0:
@@ -453,6 +453,7 @@ def train(rank, world_size, config, ddp=True):
                     print(metric_string)
                     f.write(metric_string + '\n')
 
+    wandb.finish()
     if ddp:
         dist.barrier()
         cleanup()
