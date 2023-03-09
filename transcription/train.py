@@ -28,7 +28,7 @@ import wandb
 from adabelief_pytorch import AdaBelief
 
 from .model import ARModel
-from .data import MAESTRO_V3
+from .data import MAESTRO_V3, MAESTRO
 from .loss import FocalLoss
 from .evaluate import evaluate
 from .utils import summary, CustomSampler
@@ -85,6 +85,9 @@ def cleanup():
 def get_dataset(config, split, sample_len=160256, random_sample=False, transform=False):
     if config.dataset == 'MAESTRO_V3':
         return MAESTRO_V3(groups=split, sequence_length=sample_len, 
+                          random_sample=random_sample, transform=transform)
+    elif config.dataset == 'MAESTRO_V1':
+        return MAESTRO(groups=split, sequence_length=sample_len, 
                           random_sample=random_sample, transform=transform)
 
 class ModelSaver():
@@ -152,18 +155,18 @@ class ModelSaver():
         self.last_step = step
 
     def update_top_n(self): 
-        if len(self.top_n) <= self.n_keep:
-            return
         if self.order == 'lower':
             reverse = False
         elif self.order == 'higher':
             reverse = True
         self.top_n.sort(key=lambda x: x[1], reverse=reverse)
+        self.best_ckp = self.top_n[0][0]
+        if len(self.top_n) <= self.n_keep:
+            return
         lowest = self.top_n[-1]
         if lowest[0] != self.last_ckp:
             (self.logdir / lowest[0]).unlink()
-            self.top_n = self.top_n[:-1]
-        self.best_ckp = self.top_n[0][0]
+            self.top_n = self.top_n[:self.n_keep]
 
 
 class Losses(nn.Module):
@@ -232,12 +235,10 @@ def test_step(model, batch, device):
     frame_outs = [] 
     vel_outs = []
     test_metric = defaultdict(list)
-    print(batch['step_len'])
     for n in range(audio.shape[0]):
         step_len = batch['step_len'][n]
         frame = frame_out[n][:step_len].detach().cpu()
         vel = vel_out[n][:step_len].detach().cpu()
-        print(batch['label'][n].shape, frame.shape, step_len)
         frame_outs.append(frame)
         vel_outs.append(vel)
         sample = frame.argmax(dim=-1)
@@ -263,8 +264,6 @@ def train(rank, world_size, config, ddp=True):
     model = ARModel(config).to(rank)
     if config.resume_dir:
         model_saver = ModelSaver(config, resume=True, order='higher')
-        ckp = th.load(model_saver.logdir / model_saver.last_ckp)
-        model.load_state_dict(ckp['model_state_dict'])
         step = model_saver.last_step
     else:  
         model_saver = ModelSaver(config, order='higher')
@@ -273,7 +272,7 @@ def train(rank, world_size, config, ddp=True):
         if config.resume_dir:
             # run = wandb.init('transcription', resume="allow", dir=config.logdir)
             # how?
-            run = wandb.init('transcription', id=config.id, resume="allow")
+            run = wandb.init('transcription', id=config.id, resume="must")
         else:   
             run = wandb.init('transcription', config=config, id=config.id, name=config.name, dir=config.logdir)
         summary(model)
@@ -284,8 +283,12 @@ def train(rank, world_size, config, ddp=True):
                           eps=1e-16, betas=(0.9,0.999), weight_decouple=True, 
                           rectify = False, print_change_log=False)
     if config.resume_dir:
+        ckp = th.load(model_saver.logdir / model_saver.last_ckp)
+        model.module.load_state_dict(ckp['model_state_dict'])
         ckp_opt = th.load(model_saver.logdir / model_saver.last_opt)
         optimizer.load_state_dict(ckp_opt)
+        dist.barrier()
+        del ckp, ckp_opt
         
 
     if rank == 0:
@@ -481,6 +484,7 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--debug', action='store_true')
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--resume_dir', type=Path)
+    parser.add_argument('--resume_id', type=str)
     parser.add_argument('--ddp', action='store_true')
     parser.add_argument('--no-ddp', dest='ddp', action='store_false')
     parser.set_defaults(ddp=True)
@@ -503,8 +507,8 @@ if __name__ == '__main__':
         config.iteration=100
 
     if args.resume_dir:
-        id = Path(args.resume_dir).name.split('_')[-1]
-        config.id=id
+        id = args.resume_id
+        config.id = id
         print(f'resume:{id}')
         config.logdir = args.resume_dir
     else:

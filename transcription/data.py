@@ -285,6 +285,7 @@ class MAESTRO(PianoSampleDataset):
     def __init__(self, path='data/MAESTRO', json_file='maestro-v1.0.0.json', groups=None, sequence_length=None, seed=1, 
                  random_sample=True, transform=None):
         self.json_file = json_file
+        self.path = Path(path)
         super().__init__(path, groups if groups is not None else ['train'], sequence_length, seed, 
                          random_sample=random_sample, transform=transform)
 
@@ -295,33 +296,23 @@ class MAESTRO(PianoSampleDataset):
     def files(self, group):
         metadata = json.load(open(os.path.join(self.path, self.json_file)))
 
-        if group == 'debug':
-            files = sorted([(os.path.join(self.path, row['audio_filename'].replace('.wav', '.flac')),
-                             os.path.join(self.path, row['midi_filename'])) for row in metadata if
-                            row['split'] == 'train'])
-            files = files[:50]
-        else:
-            files = sorted([(os.path.join(self.path, row['audio_filename'].replace('.wav', '.flac')),
-                             os.path.join(self.path, row['midi_filename'])) for row in metadata if row['split'] == group])
+        files = sorted([(os.path.join(self.path, row['audio_filename'].replace('.wav', '.flac')),
+                            os.path.join(self.path, row['midi_filename'])) for row in metadata if row['split'] == group])
 
-            files = [(audio if os.path.exists(audio) else audio.replace('.flac', '.wav'), midi) for audio, midi in files]
+        files = [(Path(audio) if os.path.exists(audio) else audio.replace('.flac', '.wav'), Path(midi)) for audio, midi in files]
 
         result = []
 
-        first_tsv = files[0][1].replace('.midi', '.tsv').replace('.mid', '.tsv')
-        if not os.path.exists(first_tsv):
-          for audio_path, midi_path in tqdm(files, desc='Converting midi to tsv group %s' % group, ncols=100):
-              tsv_filename = midi_path.replace('.midi', '.tsv').replace('.mid', '.tsv')
-              midi = parse_midi(midi_path)
-              np.savetxt(tsv_filename, midi, fmt='%.6f', delimiter='\t', header='onset,offset,note,velocity')
-              pedal = parse_pedal(midi_path)
-              np.savetxt(tsv_filename.replace('.tsv', '_pedal.tsv'), pedal, fmt='%.6f', delimiter='\t', header='onset,offset,type')
-              result.append((str(audio_path), str(tsv_filename)))
-        else:
-          # for audio_path, midi_path in files:
-          for audio_path, midi_path in tqdm(files, desc='Converting midi to tsv group %s' % group, ncols=100):
-              tsv_filename = midi_path.replace('.midi', '.tsv').replace('.mid', '.tsv')
-              result.append((str(audio_path), str(tsv_filename)))
+        for audio_path, midi_path in tqdm(files, desc='Converting midi to tsv group %s' % group, ncols=100):
+            tsv_filename = midi_path.with_suffix('.tsv')
+            if not tsv_filename.exists():
+                midi = parse_midi(midi_path)
+                np.savetxt(tsv_filename, midi, fmt='%.6f', delimiter='\t', header='onset,offset,note,velocity')
+                pedal = parse_pedal(midi_path)
+                np.savetxt(tsv_filename.parent / (tsv_filename.stem + '_pedal.tsv'), pedal, fmt='%.6f', delimiter='\t', header='onset,offset,type')
+            else:
+                pass
+            result.append((str(audio_path), str(tsv_filename)))
         return result
 
 
