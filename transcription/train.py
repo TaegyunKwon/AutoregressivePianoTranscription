@@ -155,18 +155,18 @@ class ModelSaver():
         self.last_step = step
 
     def update_top_n(self): 
-        if len(self.top_n) <= self.n_keep:
-            return
         if self.order == 'lower':
             reverse = False
         elif self.order == 'higher':
             reverse = True
         self.top_n.sort(key=lambda x: x[1], reverse=reverse)
+        self.best_ckp = self.top_n[0][0]
+        if len(self.top_n) <= self.n_keep:
+            return
         lowest = self.top_n[-1]
         if lowest[0] != self.last_ckp:
             (self.logdir / lowest[0]).unlink()
-            self.top_n = self.top_n[:-1]
-        self.best_ckp = self.top_n[0][0]
+            self.top_n = self.top_n[:self.n_keep]
 
 
 class Losses(nn.Module):
@@ -274,7 +274,7 @@ def train(rank, world_size, config, ddp=True):
         if config.resume_dir:
             # run = wandb.init('transcription', resume="allow", dir=config.logdir)
             # how?
-            run = wandb.init('transcription', id=config.id, resume="allow")
+            run = wandb.init('transcription', id=config.id, resume="must")
         else:   
             run = wandb.init('transcription', config=config, id=config.id, name=config.name, dir=config.logdir)
         summary(model)
@@ -505,6 +505,7 @@ if __name__ == '__main__':
 
     if args.resume_dir:
         id = args.resume_id
+        config.id = id
         print(f'resume:{id}')
         config.logdir = args.resume_dir
     else:
