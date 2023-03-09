@@ -1,0 +1,7 @@
+{
+    "model": "PC_v2",
+    "cnn_unit": 24,
+    "lstm_unit": 48,
+    "hidden_per_pitch": 48
+
+}
