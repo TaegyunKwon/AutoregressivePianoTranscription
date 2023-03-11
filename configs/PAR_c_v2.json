@@ -1,0 +1,9 @@
+{
+    "model": "PC",
+    "noisy_condition": false,
+    "win_fw": 4,
+    "win_bw": 0,
+    "pitchwise_lstm": true,
+    "film": false
+
+}
