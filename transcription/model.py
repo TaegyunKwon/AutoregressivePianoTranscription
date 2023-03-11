@@ -29,7 +29,14 @@ class ARModel(nn.Module):
             self.vel_acoustic = PAR(config.n_mels, config.cnn_unit, config.fc_unit, 
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
                                 use_film=config.film)
-        elif self.model == 'PC':
+        elif self.model == 'PAR_v2':
+            self.acoustic = PAR(config.n_mels, config.cnn_unit, config.fc_unit, 
+                                config.win_fw, config.win_bw, config.hidden_per_pitch,
+                                use_film=config.film)
+            self.vel_acoustic = PAR(config.n_mels, config.cnn_unit, config.fc_unit, 
+                                config.win_fw, config.win_bw, config.hidden_per_pitch,
+                                use_film=config.film)
+        elif self.model == 'PC_v2':
             self.acoustic = PC(config.n_mels, config.cnn_unit,
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
                                 use_film=config.film)
@@ -487,6 +494,53 @@ class PAR(nn.Module):
         x = self.layernorm(fc_x)
         return F.relu(x)
     
+class PAR_v2(nn.Module):
+    # SimpleConv without Pitchwise Conv
+    def __init__(self, n_mels, cnn_unit, fc_unit, win_fw, win_bw, hidden_per_pitch, use_film):
+        super().__init__()
+
+        self.win_fw = win_fw
+        self.win_bw = win_bw
+        self.hidden_per_pitch = hidden_per_pitch
+        # input is batch_size * 1 channel * frames * 700
+        self.cnn = nn.Sequential(
+            FilmBlock(1, cnn_unit, n_mels, use_film=use_film),
+            nn.MaxPool2d((2, 1)),
+            nn.Dropout(0.25),
+            FilmBlock(cnn_unit, cnn_unit, n_mels//2, use_film=use_film),
+            nn.MaxPool2d((2, 1)),
+            FilmBlock(cnn_unit, cnn_unit, n_mels//4, use_film=use_film),
+            nn.Dropout(0.25),
+        )
+
+        self.fc = nn.Sequential(
+            nn.Linear((cnn_unit) * (n_mels // 4), fc_unit),
+            nn.Dropout(0.25),
+            nn.ReLU()
+        )
+
+        self.fc = nn.Sequential(
+            nn.Linear((cnn_unit) * (n_mels // 4), fc_unit),
+            nn.Dropout(0.25),
+            nn.ReLU()
+        )
+
+        # self.win_fc = nn.Linear(fc_unit*(win_fw+win_bw+1), hidden_per_pitch//2*88)
+        self.win_fc = nn.Conv1d(fc_unit, fc_unit, self.win_fw+self.win_bw+1)
+        self.pitch_linear = nn.Linear(fc_unit, self.hidden_per_pitch*88)
+        self.layernorm = nn.LayerNorm([hidden_per_pitch, 88])
+
+    def forward(self, mel):
+        batch_size = mel.shape[0]
+        x = mel.unsqueeze(1)  # B 1 L F
+        x = x.transpose(2,3)  # B 1 F L
+        x = self.cnn(x)  # B C F L
+        fc_x = self.fc(x.permute(0, 3, 1, 2).flatten(-2)) # B L C
+        fc_x = F.pad(fc_x.permute(0,2,1), (self.win_bw, self.win_fw)) # B C L 
+        multistep_x = self.win_fc(fc_x)
+        pitchwise_x = self.pitch_linear(multistep_x.transpose(1,2))
+        pitchwise_x = pitchwise_x.view(batch_size, -1, self.hidden_per_pitch, 88)
+        return F.relu(self.layernorm(pitchwise_x))
     
 class PC(nn.Module):
     def __init__(self, n_mels, cnn_unit, win_fw, win_bw, hidden_per_pitch, use_film=True, v2=False):
