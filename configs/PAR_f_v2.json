@@ -1,4 +1,5 @@
 {
+    "model": "PAR_v2",
     "noisy_condition": true,
     "win_fw": 4,
     "win_bw": 0,

@@ -30,10 +30,10 @@ class ARModel(nn.Module):
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
                                 use_film=config.film)
         elif self.model == 'PAR_v2':
-            self.acoustic = PAR(config.n_mels, config.cnn_unit, config.fc_unit, 
+            self.acoustic = PAR_v2(config.n_mels, config.cnn_unit, config.fc_unit, 
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
                                 use_film=config.film)
-            self.vel_acoustic = PAR(config.n_mels, config.cnn_unit, config.fc_unit, 
+            self.vel_acoustic = PAR_v2(config.n_mels, config.cnn_unit, config.fc_unit, 
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
                                 use_film=config.film)
         elif self.model == 'PC_v2':

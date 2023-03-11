@@ -1,5 +1,5 @@
 {
-    "model": "PC",
+    "model": "PAR_v2",
     "noisy_condition": false,
     "win_fw": 4,
     "win_bw": 0,
