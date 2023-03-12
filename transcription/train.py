@@ -162,8 +162,8 @@ class ModelSaver():
         self.top_n.sort(key=lambda x: x[1], reverse=reverse)
         self.best_ckp = self.top_n[0][0]
         if len(self.top_n) > self.n_keep:
-            for ckp in self.top_n[self.n_keep:]:
-                (self.logdir / ckp).unlink()
+            for save_name, _, _ in self.top_n[self.n_keep:]:
+                (self.logdir / save_name).unlink()
             self.top_n = self.top_n[:self.n_keep]
 
 class Losses(nn.Module):
