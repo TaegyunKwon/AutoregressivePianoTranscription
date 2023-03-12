@@ -280,10 +280,12 @@ def train(rank, world_size, config, ddp=True):
     if config.resume_dir:
         ckp = th.load(model_saver.logdir / model_saver.last_ckp, map_location={'cuda:0':f'cuda:{rank}'})
         model.module.load_state_dict(ckp['model_state_dict'])
-        ckp_opt = th.load(model_saver.logdir / model_saver.last_opt)
-        optimizer.load_state_dict(ckp_opt)
+        del ckp
+        if not config.eval:
+            ckp_opt = th.load(model_saver.logdir / model_saver.last_opt)
+            optimizer.load_state_dict(ckp_opt)
+            del ckp_opt
         dist.barrier()
-        del ckp, ckp_opt
         
 
     if rank == 0:
@@ -319,10 +321,10 @@ def train(rank, world_size, config, ddp=True):
 
     loss_fn = Losses()
 
-    if config.eval:
-        step = 1000000
     if rank == 0: loop = tqdm(range(step, config.iteration), total=config.iteration, initial=step)
     for epoch in range(10000):
+        if config.eval:
+            break
         if ddp:
             data_loader_train.sampler.set_epoch(epoch)
         for batch in data_loader_train:
@@ -459,10 +461,13 @@ def train(rank, world_size, config, ddp=True):
     
     
 def run_demo(demo_fn, world_size, config):
-    mp.spawn(demo_fn,
-             args=(world_size, config),
-             nprocs=world_size,
-             join=True)
+    try:
+        mp.spawn(demo_fn,
+                args=(world_size, config),
+                nprocs=world_size,
+                join=True)
+    finally:
+        wandb.finish()
     
 
 if __name__ == '__main__':
