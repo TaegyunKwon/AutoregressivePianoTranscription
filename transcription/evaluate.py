@@ -3,7 +3,12 @@ from collections import defaultdict
 import torch as th
 import numpy as np
 from scipy.stats import hmean
+import argparse
+from pathlib import Path
+from multiprocessing import Pool
+from functools import partial
 
+from tqdm import tqdm
 from mir_eval.util import midi_to_hz
 from mir_eval.multipitch import evaluate as evaluate_frames
 from mir_eval.transcription import precision_recall_f1_overlap as evaluate_notes
@@ -11,6 +16,7 @@ from mir_eval.transcription_velocity import precision_recall_f1_overlap as evalu
 
 from .constants import HOP, SR, MIN_MIDI
 from .decode import extract_notes, notes_to_frames
+from .data import MAESTRO, MAESTRO_V3
 
 #  BASE       = ['off', 'offset', 'onset', 'sustain', 'reonset']
 eps = sys.float_info.epsilon
@@ -84,11 +90,81 @@ def evaluate(sample, label, sample_vel=None, vel_ref=None):
     metrics['metric/onset_velocity/abs_err'].append(np.mean(np.abs(err)))
     metrics['metric/onset_velocity/rel_err'].append(np.mean(np.abs(err) / gt))
 
+    '''
     frame_metrics = evaluate_frames(t_ref, f_ref, t_est, f_est)
     metrics['metric/frame/f1'].append(hmean(
         [frame_metrics['Precision'] + eps, frame_metrics['Recall'] + eps]) - eps)
 
     for key, value in frame_metrics.items():
         metrics['metric/frame/' + key.lower().replace(' ', '_')].append(value)
+    '''
         
     return metrics
+
+
+def reevalute(label_path, pred_path, onset_weight=1):
+    labels = th.load(label_path)
+    label = labels['label'][1:]
+    vel_label = labels['velocity'][1:]
+    pred = np.load(pred_path)
+    frame_pred = pred['pred']
+    vel_pred = pred['vel']
+    frame_pred[:,:,2] *= onset_weight
+    sample = frame_pred.argmax(-1)
+    metric = evaluate(th.from_numpy(sample), label, th.from_numpy(vel_pred), vel_label)
+    return metric
+
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('dataset', type=str)
+    parser.add_argument('pred_path', type=Path)
+    parser.add_argument('out_name', type=Path)
+    parser.add_argument('-w', '--onset_weight', type=float, default=1.0)
+    
+    args = parser.parse_args()
+    if args.dataset == 'MAESTRO_V3':
+        dataset = MAESTRO_V3(groups=['test'], sequence_length=None) 
+    elif args.dataset == 'MAESTRO_V1':
+        dataset = MAESTRO(groups=['test'], sequence_length=None) 
+    dataset.sort_by_length()
+    target_paths = []
+    for path_pair in dataset.data_path:
+        audio_path = path_pair[0]
+        label_path = audio_path.replace('.flac', '_parsed.pt').replace('.wav', '_parsed.pt')
+        pred_path = args.pred_path / Path(audio_path).with_suffix('.npz').name
+        target_paths.append((label_path, pred_path))
+
+    total_metrics = defaultdict(list)
+    for pair in tqdm(target_paths):
+        print(pair[1])
+        metric = reevalute(pair[0], pair[1], args.onset_weight)
+        for k in metric.keys():
+            total_metrics[k].extend(metric[k])
+    
+    '''
+    def my_func(pair):
+        return partial(reevalute, onset_weight=args.onset_weight)(pair[0], pair[1])
+    with Pool(processes=4) as pool:
+        metrics = list(
+            pool.imap(
+                my_func, 
+                target_paths
+                ))
+    total_metrics = defaultdict(list)
+    for n in range(len(metrics)):
+        for k in metrics[0].keys():
+            total_metrics[k].extend(metrics[n][k])
+    '''
+    
+    with open(Path(args.out_name).with_suffix('.txt'), 'w') as f:
+        print('test metric')
+        for key, value in total_metrics.items():
+            category, name = key.split('/')
+            multiplier = 100
+            if 'err' in key:
+                multiplier=1
+            metric_string = f'{category:>32} {name:26}: {np.mean(value)*multiplier:.3f} +- {np.std(value)*multiplier:.3f}'
+            print(metric_string)
+            f.write(metric_string + '\n')
