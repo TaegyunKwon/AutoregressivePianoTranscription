@@ -104,8 +104,8 @@ def evaluate(sample, label, sample_vel=None, vel_ref=None):
 
 def reevalute(label_path, pred_path, onset_weight=1):
     labels = th.load(label_path)
-    label = labels['label'][1:]
-    vel_label = labels['velocity'][1:]
+    label = labels['label']
+    vel_label = labels['velocity']
     pred = np.load(pred_path)
     frame_pred = pred['pred']
     vel_pred = pred['vel']
@@ -137,6 +137,7 @@ if __name__ == '__main__':
         target_paths.append((label_path, pred_path))
 
     total_metrics = defaultdict(list)
+    '''
     for pair in tqdm(target_paths):
         print(pair[1])
         metric = reevalute(pair[0], pair[1], args.onset_weight)
@@ -147,21 +148,20 @@ if __name__ == '__main__':
     def my_func(pair):
         return partial(reevalute, onset_weight=args.onset_weight)(pair[0], pair[1])
     with Pool(processes=4) as pool:
-        metrics = list(
+        metrics = list(tqdm(
             pool.imap(
                 my_func, 
                 target_paths
-                ))
+                )))
     total_metrics = defaultdict(list)
     for n in range(len(metrics)):
         for k in metrics[0].keys():
             total_metrics[k].extend(metrics[n][k])
-    '''
     
     with open(Path(args.out_name).with_suffix('.txt'), 'w') as f:
         print('test metric')
         for key, value in total_metrics.items():
-            category, name = key.split('/')
+            _, category, name = key.split('/')
             multiplier = 100
             if 'err' in key:
                 multiplier=1
