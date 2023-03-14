@@ -89,6 +89,8 @@ def get_dataset(config, split, sample_len=160256, random_sample=False, transform
     elif config.dataset == 'MAESTRO_V1':
         return MAESTRO(groups=split, sequence_length=sample_len, 
                           random_sample=random_sample, transform=transform)
+    else:
+        raise KeyError
 
 class ModelSaver():
     def __init__(self, config, order='lower', n_keep=3, resume=False):

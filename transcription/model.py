@@ -43,7 +43,7 @@ class ARModel(nn.Module):
             self.vel_acoustic = AllConv(config.n_mels, config.cnn_unit, config.fc_unit, 
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
                                 use_film=config.film)
-        elif self.model == 'PC_v2':
+        elif self.model == 'PC':
             self.acoustic = PC(config.n_mels, config.cnn_unit,
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
                                 use_film=config.film)
