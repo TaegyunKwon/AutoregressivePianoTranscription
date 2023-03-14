@@ -2,9 +2,12 @@
 import torch as th
 import torch.nn as nn
 import librosa
-import nnAudio
+import nnAudio.features
 import nnAudio.utils
 from .constants import SR, HOP
+import warnings
+
+warnings.filterwarnings("ignore", category=SyntaxWarning)
 
 midi_min = 21
 n_per_midi = 4
@@ -77,3 +80,31 @@ class CQT(nn.Module):
             cqt = th.log(th.clamp(cqt, min=1e-6)+7)
         return cqt
             
+class MultiCQT(nn.Module):
+    def __init__(self):
+        super().__init__()
+        midi_low = 21
+        midi_mid = 57
+        midi_high = 75
+        midi_edges = [midi_low, midi_mid, midi_high]
+        n_per_midi = 8
+
+        midi_width = 1 / n_per_midi
+        edge_freq = []
+        for edge in midi_edges:
+            midi_start = edge - (n_per_midi//2 - 0.5)*midi_width
+            freq_start = 440*2**((midi_start-69)/12)
+            edge_freq.append(freq_start)
+
+        self.cqt_low = nnAudio.features.cqt.CQT(sr=16000, hop_length=512, fmin=edge_freq[0], fmax=edge_freq[1]-0.1, bins_per_octave=96,
+                                        filter_scale=0.5)
+        self.cqt_mid = nnAudio.features.cqt.CQT(sr=16000, hop_length=512, fmin=edge_freq[1], fmax=edge_freq[2]-0.1, bins_per_octave=96,
+                                        filter_scale=1)
+        self.cqt_high = nnAudio.features.cqt.CQT(sr=16000, hop_length=512, fmin=edge_freq[2], fmax=8000, bins_per_octave=96,
+                                        filter_scale=1.5)
+
+    def forward(self, audio):
+        # audio: (B x L)
+        # cqt: (B, F, T)
+        cqts = [self.cqt_low(audio), self.cqt_mid(audio), self.cqt_high(audio)]
+        return th.concat(cqts, 1)
