@@ -161,13 +161,10 @@ class ModelSaver():
             reverse = True
         self.top_n.sort(key=lambda x: x[1], reverse=reverse)
         self.best_ckp = self.top_n[0][0]
-        if len(self.top_n) <= self.n_keep:
-            return
-        lowest = self.top_n[-1]
-        if lowest[0] != self.last_ckp:
-            (self.logdir / lowest[0]).unlink()
+        if len(self.top_n) > self.n_keep:
+            for save_name, _, _ in self.top_n[self.n_keep:]:
+                (self.logdir / save_name).unlink()
             self.top_n = self.top_n[:self.n_keep]
-
 
 class Losses(nn.Module):
     def __init__(self):
@@ -270,9 +267,7 @@ def train(rank, world_size, config, ddp=True):
         step = 0
     if rank == 0:
         if config.resume_dir:
-            # run = wandb.init('transcription', resume="allow", dir=config.logdir)
-            # how?
-            run = wandb.init('transcription', id=config.id, resume="must")
+            run = wandb.init('transcription', id=config.id, resume="must", dir=config.logdir)
         else:   
             run = wandb.init('transcription', config=config, id=config.id, name=config.name, dir=config.logdir)
         summary(model)
@@ -283,12 +278,14 @@ def train(rank, world_size, config, ddp=True):
                           eps=1e-16, betas=(0.9,0.999), weight_decouple=True, 
                           rectify = False, print_change_log=False)
     if config.resume_dir:
-        ckp = th.load(model_saver.logdir / model_saver.last_ckp)
+        ckp = th.load(model_saver.logdir / model_saver.last_ckp, map_location={'cuda:0':f'cuda:{rank}'})
         model.module.load_state_dict(ckp['model_state_dict'])
-        ckp_opt = th.load(model_saver.logdir / model_saver.last_opt)
-        optimizer.load_state_dict(ckp_opt)
+        del ckp
+        if not config.eval:
+            ckp_opt = th.load(model_saver.logdir / model_saver.last_opt)
+            optimizer.load_state_dict(ckp_opt)
+            del ckp_opt
         dist.barrier()
-        del ckp, ckp_opt
         
 
     if rank == 0:
@@ -324,22 +321,22 @@ def train(rank, world_size, config, ddp=True):
 
     loss_fn = Losses()
 
-    if config.eval:
-        step = 1000000
     if rank == 0: loop = tqdm(range(step, config.iteration), total=config.iteration, initial=step)
     for epoch in range(10000):
+        if config.eval:
+            break
         if ddp:
             data_loader_train.sampler.set_epoch(epoch)
         for batch in data_loader_train:
-            if rank ==0: loop.update(1)
             step += 1
             if step > config.iteration:
                 break
+            if rank ==0: loop.update(1)
             model.train()
             loss, vel_loss = train_step(model, batch, loss_fn, optimizer, scheduler, device, config)
             if rank == 0:
                 run.log({"train": dict(frame_loss=loss.mean(), vel_loss=vel_loss.mean())}, step=step)
-
+            del loss, vel_loss, batch
             if step % config.valid_interval == 0 or step == 5000:
                 model.eval()
 
@@ -368,13 +365,13 @@ def train(rank, world_size, config, ddp=True):
                             valid_mean[k] = np.mean(np.concatenate(v))
                 
                 if rank == 0:
-                    print('validation metric')
+                    print(f'validation metric: step:{step}')
                     run.log({'valid':valid_mean}, step=step)
                     for key, value in valid_mean.items():
                         if key[-2:] == 'f1' or 'loss' in key or key[-3:] == 'err':
                             print(f'{key} : {value}')
                     valid_mean['metric/note/f1']
-                    model_saver.update(model, optimizer, step, valid_mean['metric/note/f1'], ddp=ddp)
+                    model_saver.update(model, optimizer, step, valid_mean['metric/note-with-offsets/f1'], ddp=ddp)
                 if ddp:
                     dist.barrier()
         if step > config.iteration:
@@ -456,6 +453,7 @@ def train(rank, world_size, config, ddp=True):
                     print(metric_string)
                     f.write(metric_string + '\n')
 
+    wandb.finish()
     if ddp:
         dist.barrier()
         cleanup()
@@ -464,10 +462,13 @@ def train(rank, world_size, config, ddp=True):
     
     
 def run_demo(demo_fn, world_size, config):
-    mp.spawn(demo_fn,
-             args=(world_size, config),
-             nprocs=world_size,
-             join=True)
+    try:
+        mp.spawn(demo_fn,
+                args=(world_size, config),
+                nprocs=world_size,
+                join=True)
+    finally:
+        wandb.finish()
     
 
 if __name__ == '__main__':
