@@ -1,0 +1,12 @@
+{
+    "model": "PC_CQT_v3",
+    "n_mels": 790,
+    "noisy_condition": true,
+    "win_fw": 4,
+    "win_bw": 0,
+    "pitchwise_lstm": true,
+    "film": true,
+    "cnn_unit": 8,
+    "lstm_unit": 8,
+    "hidden_per_pitch": 8
+}
