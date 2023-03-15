@@ -1074,7 +1074,7 @@ class PC_CQT(nn.Module):
             x = self.large_conv_l3(F.pad(x, (24,24)))
             x = F.relu(x)
         x_pitchwise = self.fc_0(cnn_out)  # B x 1 x L x n_mels/4
-        x_pitchwise = x_pitchwise.transpose(1, 2).flatten(-2).transpose(1,2) # (B x n_mels/4 x L)
+        x_pitchwise = x_pitchwise.transpose(1, 2).contiguous().flatten(-2).transpose(1,2).contiguous()# (B x n_mels/4 x L)
 
         x_pitchwise = F.relu(self.fc_1(x_pitchwise)) # B x H*88 x L
         res = self.fc_2(x_pitchwise)
