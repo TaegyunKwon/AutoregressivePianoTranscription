@@ -81,7 +81,7 @@ class ARModel(nn.Module):
             self.vel_acoustic = PC(config.n_mels, config.cnn_unit,
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
                                 use_film=config.film, v2=True)
-        elif self.model == 'PC_v2':
+        elif self.model == 'PC_CQT':
             self.acoustic = PC_CQT(config.n_mels, config.cnn_unit,
                                 config.win_fw, config.win_bw, config.hidden_per_pitch//2,
                                 use_film=config.film)
@@ -1031,13 +1031,13 @@ class PC_CQT(nn.Module):
                 nn.ReLU(),
             )
         f_size = 49 
-        self.large_conv_l1 = nn.Conv2d(cnn_unit*cnn_multipler[2], hidden_per_pitch, (1, f_size), padding=0, stride=(2,1))
+        self.large_conv_l1 = nn.Conv2d(cnn_unit*cnn_multipler[2], hidden_per_pitch, (1, f_size), padding=0, stride=(1,2))
         self.large_conv_l2 = nn.Conv2d(hidden_per_pitch, hidden_per_pitch, (1, f_size), padding=0)
         self.large_conv_l3 = nn.Conv2d(hidden_per_pitch, hidden_per_pitch, (1, f_size), padding=0)
         if use_film:
-            self.film_1 = FilmLayer(n_mels//4, hidden_per_pitch, hidden=16)
-            self.film_2 = FilmLayer(n_mels//4, hidden_per_pitch, hidden=16)
-            self.film_3 = FilmLayer(n_mels//4, hidden_per_pitch, hidden=16)
+            self.film_1 = FilmLayer(88, hidden_per_pitch, hidden=16)
+            self.film_2 = FilmLayer(88, hidden_per_pitch, hidden=16)
+            self.film_3 = FilmLayer(88, hidden_per_pitch, hidden=16)
        
         self.fc_0 = nn.Sequential(
             nn.Conv2d(cnn_unit*cnn_multipler[2], 4, 1, padding=0),
