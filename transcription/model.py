@@ -838,6 +838,7 @@ class PC(nn.Module):
         )
 
     def forward(self, mel):
+        # mel : B L F
         if self.use_film:
             x = mel.unsqueeze(1)
             batch_size = x.shape[0]
@@ -1051,7 +1052,7 @@ class PC_CQT(nn.Module):
 
         self.window_cnn = nn.Sequential(
             nn.ZeroPad2d((0, 0, self.win_bw, self.win_fw)),
-            nn.Conv2d(hidden_per_pitch, hidden_per_pitch, (self.win_bw + self.win_fw + 1, 1))
+            nn.Conv2d(hidden_per_pitch*2, hidden_per_pitch*2, (self.win_bw + self.win_fw + 1, 1))
         )
 
     def forward(self, mel):
@@ -1072,14 +1073,14 @@ class PC_CQT(nn.Module):
             x = F.relu(x)
             x = self.large_conv_l3(F.pad(x, (24,24)))
             x = F.relu(x)
-        x_pitchwise = self.fc_0(x)  # B x 1 x L x n_mels/4
+        x_pitchwise = self.fc_0(cnn_out)  # B x 1 x L x n_mels/4
         x_pitchwise = x_pitchwise.transpose(1, 2).flatten(-2).transpose(1,2) # (B x n_mels/4 x L)
 
-        x_pitchwise = F.relu(self.fc_1(x_pitchwise)) # B x H/2*88 x L
+        x_pitchwise = F.relu(self.fc_1(x_pitchwise)) # B x H*88 x L
         res = self.fc_2(x_pitchwise)
         res = self.fc_3(F.relu(res))
         x_pitchwise = x_pitchwise + res
-        x_pitchwise = x_pitchwise.reshape(batch_size, self.hidden_per_pitch//2, 88, -1).permute(0, 1, 3, 2)
+        x_pitchwise = x_pitchwise.reshape(batch_size, self.hidden_per_pitch, 88, -1).permute(0, 1, 3, 2)
         # B, H, L, 88
 
         x = th.cat((x_pitchwise, x), 1)
