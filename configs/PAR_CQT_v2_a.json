@@ -1,5 +1,5 @@
 {
-    "model": "PAR_CQT",
+    "model": "PAR_CQT_v2",
     "n_mels": 790,
     "noisy_condition": false,
     "win_fw": 0,
