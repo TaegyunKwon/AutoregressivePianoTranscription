@@ -67,15 +67,16 @@ default_dict = dict(
     debug=False,
     seed=1000,
     resume_dir=None,
-    iteration=250000
+    iteration=250000,
+    port=23456
     
     )
    
    
-def setup(rank, world_size):
+def setup(rank, world_size, port=23456):
     # initialize the process group
     dist.init_process_group(backend='nccl',
-                        init_method='tcp://127.0.0.1:23456',
+                        init_method=f'tcp://127.0.0.1:{port}',
                         world_size=world_size,
                         rank=rank)
 
@@ -252,7 +253,7 @@ def test_step(model, batch, device):
 def train(rank, world_size, config, ddp=True):
     th.cuda.set_device(rank)
     if ddp:
-        setup(rank, world_size)
+        setup(rank, world_size, port=config.port)
     else:
         assert world_size == 1 and rank == 0
     device = f'cuda:{rank}'
@@ -489,6 +490,7 @@ if __name__ == '__main__':
     parser.add_argument('--resume_id', type=str)
     parser.add_argument('--ddp', action='store_true')
     parser.add_argument('--no-ddp', dest='ddp', action='store_false')
+    parser.add_argument('--port', type=int)
     parser.set_defaults(ddp=True)
     parser.set_defaults(eval=False)
     
