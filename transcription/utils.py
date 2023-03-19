@@ -48,7 +48,7 @@ def summary(model, file=sys.stdout):
         # file.flush()
     '''
     print(string)
-    return count
+    return string, count
 
 class CustomSampler(Sampler):
     def __init__(self, indexes):
