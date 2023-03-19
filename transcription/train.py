@@ -382,6 +382,7 @@ def train(rank, world_size, config, ddp=True):
 
     # Test phase
     model.eval()
+    model_saver = ModelSaver(config, resume=True, order='higher')  # to load best model for all ranks
     SAVE_PATH = config.logdir / (Path(model_saver.best_ckp).stem + f'_eval_{config.dataset}')
     SAVE_PATH.mkdir(exist_ok=True)
     map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
@@ -440,6 +441,8 @@ def train(rank, world_size, config, ddp=True):
         
     if rank == 0:
         with open((Path(SAVE_PATH) / f'summary_{config.dataset}.txt'), 'w') as f:
+            string, count = summary(model) 
+            f.write(string + '\n')
             print('test metric')
             run.log({'test':test_mean}, step=step)
             for key, value in test_mean.items():
