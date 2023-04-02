@@ -82,13 +82,13 @@ def setup(rank, world_size):
 def cleanup():
     dist.destroy_process_group()
     
-def get_dataset(config, split, sample_len=160256, random_sample=False, transform=False):
+def get_dataset(config, split, sample_len=160256, random_sample=False, transform=False, load_mode='lazy'):
     if config.dataset == 'MAESTRO_V3':
         return MAESTRO_V3(groups=split, sequence_length=sample_len, 
-                          random_sample=random_sample, transform=transform)
+                          random_sample=random_sample, transform=transform, load_mode=load_mode)
     elif config.dataset == 'MAESTRO_V1':
         return MAESTRO(groups=split, sequence_length=sample_len, 
-                          random_sample=random_sample, transform=transform)
+                          random_sample=random_sample, transform=transform, load_mode=load_mode)
     else:
         raise KeyError
 
@@ -164,9 +164,13 @@ class ModelSaver():
         self.top_n.sort(key=lambda x: x[1], reverse=reverse)
         self.best_ckp = self.top_n[0][0]
         if len(self.top_n) > self.n_keep:
-            for save_name, _, _ in self.top_n[self.n_keep:]:
-                (self.logdir / save_name).unlink()
             self.top_n = self.top_n[:self.n_keep]
+            del_list = self.top_n[self.n_keep:]
+            for save_name, score, step in del_list:
+                if self.last_ckp == save_name:
+                    self.top_n.append((save_name, score, step))
+                    continue
+                (self.logdir / save_name).unlink()
 
 class Losses(nn.Module):
     def __init__(self):
@@ -295,9 +299,9 @@ def train(rank, world_size, config, ddp=True):
 
     scheduler = StepLR(optimizer, step_size=5000, gamma=0.95)
     train_set = get_dataset(config, ['train'], sample_len=config.seq_len, 
-                            random_sample=True, transform=config.noisy_condition)
+                            random_sample=True, transform=config.noisy_condition, load_mode='lazy')
     valid_set = get_dataset(config, ['validation'], sample_len=config.valid_seq_len,
-                            random_sample=False, transform=False)
+                            random_sample=False, transform=False, load_mode='lazy')
     if ddp:
         train_sampler = DistributedSampler(dataset=train_set, num_replicas=world_size, 
                                         rank=rank, shuffle=True)

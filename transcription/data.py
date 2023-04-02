@@ -53,7 +53,7 @@ def vel_transform(arr, var, prob, zero_prob):
 
 class PianoSampleDataset(Dataset):
     def __init__(self, path, groups=None, sample_length=16000*5, seed=1, 
-                 random_sample=True, transform=None, delay=1):
+                 random_sample=True, transform=None, delay=1, load_mode='lazy'):
         self.path = path
         self.groups = groups if groups is not None else self.available_groups()
         self.random_sample = random_sample
@@ -70,14 +70,23 @@ class PianoSampleDataset(Dataset):
 
         self.file_list = dict()
         
+        self.load_mode=load_mode
+        
         # outputs
         self.frame_features = ['label', 'pedal_label', 'velocity', 
                                'last_onset_time', 'last_onset_vel']
         # aggregate files in all groups
+        if load_mode == 'ram':
+            self.data = []
         for group in groups:
             self.file_list[group] = self.files(group)
-            for input_pair in self.file_list[group]:
+            for input_pair in tqdm(self.file_list[group], desc='load files'):
                 self.data_path.append(input_pair)
+                if load_mode == 'ram':
+                    audio_path = input_pair[0]
+                    saved_data_path = audio_path.replace('.flac', '_parsed.pt').replace('.wav', '_parsed.pt')
+                    data = th.load(saved_data_path)
+                    self.data.append(data)
 
     def __getitem__(self, index):
         '''
@@ -91,9 +100,12 @@ class PianoSampleDataset(Dataset):
         '''
 
         audio_path = self.data_path[index][0]
-        saved_data_path = audio_path.replace('.flac', '_parsed.pt').replace('.wav', '_parsed.pt')
-        data = th.load(saved_data_path)
         result = dict(path=audio_path)
+        if self.load_mode == 'ram':
+            data = self.data[index]
+        else:
+            saved_data_path = audio_path.replace('.flac', '_parsed.pt').replace('.wav', '_parsed.pt')
+            data = th.load(saved_data_path)
 
         if self.sample_length is not None:  # fixed length segmentation
             audio_length = len(data['audio'])
@@ -318,10 +330,10 @@ class MAESTRO(PianoSampleDataset):
 
 class MAESTRO_V3(PianoSampleDataset):
     def __init__(self, path='data/maestro-v3.0.0', meta_file='maestro-v3.0.0.csv', groups=None, sequence_length=None, seed=1, 
-                 random_sample=True, transform=None):
+                 random_sample=True, transform=None, load_mode='lazy'):
         self.meta_file = meta_file
         self.path = Path(path)
-        super().__init__(self.path, groups, sequence_length, seed, random_sample, transform)
+        super().__init__(self.path, groups, sequence_length, seed, random_sample, transform, load_mode=load_mode)
 
     @classmethod
     def available_groups(cls):
