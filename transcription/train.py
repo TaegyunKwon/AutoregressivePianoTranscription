@@ -35,7 +35,7 @@ from .utils import summary, CustomSampler
 from .transcribe import PadCollate, transcribe
 
 th.autograd.set_detect_anomaly(True)
-
+os.environ["WANDB_DISABLE_SERVICE"] = "true"
 
 def remove_progress(captured_out):
     lines = (line for line in captured_out.splitlines() if ('it/s]' not in line) and ('s/it]' not in line))
@@ -165,13 +165,16 @@ class ModelSaver():
         self.top_n.sort(key=lambda x: x[1], reverse=reverse)
         self.best_ckp = self.top_n[0][0]
         if len(self.top_n) > self.n_keep:
-            self.top_n = self.top_n[:self.n_keep]
             del_list = self.top_n[self.n_keep:]
+            self.top_n = self.top_n[:self.n_keep]
+            print(self.top_n, del_list)
             for save_name, score, step in del_list:
+                print(del_list)
                 if self.last_ckp == save_name:
                     self.top_n.append((save_name, score, step))
                     continue
                 (self.logdir / save_name).unlink()
+                print(f'Delete {save_name}')
 
 class Losses(nn.Module):
     def __init__(self):
@@ -296,7 +299,7 @@ def train(rank, world_size, config, ddp=True):
         
 
     if rank == 0:
-        run.watch(model, log_freq=100)
+        run.watch(model, log_freq=1000)
 
     scheduler = StepLR(optimizer, step_size=5000, gamma=0.95)
     train_set = get_dataset(config, ['train'], sample_len=config.seq_len, 
@@ -353,6 +356,8 @@ def train(rank, world_size, config, ddp=True):
                         batch_metric, _, _ = valid_step(model, batch, loss_fn, device, config)
                         for k, v in batch_metric.items():
                             validation_metric[k].extend(v)
+                        if config.debug:
+                            break
                             
                 valid_mean = defaultdict(list)
                 if ddp:
@@ -405,7 +410,7 @@ def train(rank, world_size, config, ddp=True):
     else:
         test_sampler = None
     if config.debug:
-        test_sampler = iter([rank])
+        test_sampler = iter([[0,1]])
     data_loader_test = DataLoader(
         test_set, batch_sampler=test_sampler,
         num_workers=config.n_workers,
@@ -513,9 +518,9 @@ if __name__ == '__main__':
             config.update({k:v})
     config = SimpleNamespace(**config)
     if config.debug:
-        config.valid_interval=10
+        config.valid_interval=5
         config.valid_seq_len=160256
-        config.iteration=100
+        config.iteration=50
 
     if args.resume_dir:
         id = args.resume_id
@@ -526,10 +531,11 @@ if __name__ == '__main__':
         id = wandb.util.generate_id()
         config.id = id
         print(f'init:{id}')
-        if config.name:
+        if hasattr(config, 'name'):
             config.logdir = Path('runs') / \
             ('_'.join([config.model, datetime.now().strftime('%y%m%d-%H%M%S'), config.name]))
         else:
+            config.name=id
             config.logdir = Path('runs') / \
             ('_'.join([config.model, datetime.now().strftime('%y%m%d-%H%M%S'), id]))
         Path(config.logdir).mkdir(exist_ok=True)
