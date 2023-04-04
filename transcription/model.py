@@ -112,6 +112,13 @@ class ARModel(nn.Module):
             self.vel_acoustic = PAR_Mel2(config.cnn_unit, config.fc_unit,
                                 config.win_fw, config.win_bw, config.hidden_per_pitch//2,
                                 use_film=config.film)
+        elif self.model == 'PAR_Mel2_highres':
+            self.acoustic = PAR_Mel2_highres(config.cnn_unit, config.fc_unit,
+                                config.win_fw, config.win_bw, config.hidden_per_pitch//2,
+                                use_film=config.film)
+            self.vel_acoustic = PAR_Mel2_highres(config.cnn_unit, config.fc_unit,
+                                config.win_fw, config.win_bw, config.hidden_per_pitch//2,
+                                use_film=config.film)
             
         else:
             raise KeyError(f'wrong model:{self.model}')
@@ -728,6 +735,89 @@ class PAR_Mel2(nn.Module):
         high = self.cnn_high(high)  # B C F L
 
         conv_feature = th.cat([low, high], dim=2)
+        fc_feature = th.cat([lowest, low, high], dim=2)
+
+        conv_x = F.pad(conv_feature, (self.win_bw, self.win_fw, 32, 88+28-78))
+        conv_x = self.large_conv(conv_x) # B H 88, L
+        conv_x = conv_x.view(conv_x.shape[0], self.hidden_per_pitch*88, -1)
+
+        fc_x = self.fc(fc_feature.permute(0, 3, 1, 2).flatten(-2))
+        fc_x = self.fc2(fc_x).transpose(1, 2) # B 88H L
+
+        x = th.cat([conv_x, fc_x], dim=1)
+        x = F.relu(self.group_conv1(x))
+        x = F.relu(self.group_conv2(x))
+        x = F.relu(self.group_conv3(x))
+        x = x.view(x.shape[0], self.hidden_per_pitch*2, 88, -1).permute(0, 3, 1, 2)
+
+        return F.relu(self.layernorm(x)), fc_feature.detach()
+
+class PAR_Mel2_highres(nn.Module):
+    # three branch, use sub-semitone-spaced middle feature for fc
+    def __init__(self, cnn_unit, fc_unit, win_fw, win_bw, hidden_per_pitch, use_film):
+        super().__init__()
+
+        self.win_fw = win_fw
+        self.win_bw = win_bw
+        self.hidden_per_pitch = hidden_per_pitch
+        # input is batch_size * 1 channel * frames * 700
+        self.cnn_low = nn.Sequential(
+            FilmBlock(1, cnn_unit, 57, use_film=use_film),
+            nn.MaxPool2d((3, 1)),
+            nn.Dropout(0.25),
+            FilmBlock(cnn_unit, cnn_unit, 19, use_film=use_film),
+            FilmBlock(cnn_unit, cnn_unit, 19, use_film=use_film),
+        )
+        self.cnn_high = nn.Sequential(
+            FilmBlock(1, cnn_unit, 472, use_film=use_film),
+            nn.MaxPool2d((2, 1)),
+            nn.Dropout(0.25),
+            FilmBlock(cnn_unit, cnn_unit, 472//2, use_film=use_film),
+            nn.MaxPool2d((2, 1)),
+            FilmBlock(cnn_unit, cnn_unit, 472//4, use_film=use_film),
+            nn.Dropout(0.25),
+        )
+        self.cnn_lowest = nn.Sequential(
+            FilmBlock(1, cnn_unit, 11, use_film=use_film),
+            nn.Dropout(0.25),
+            FilmBlock(cnn_unit, cnn_unit, 11, use_film=use_film),
+            nn.Dropout(0.25),
+            FilmBlock(cnn_unit, cnn_unit, 11, use_film=use_film),
+        )
+
+        self.large_conv = nn.Conv2d(cnn_unit, hidden_per_pitch, (61, self.win_fw+self.win_bw+1))
+
+        self.fc = nn.Sequential(
+            nn.Linear((cnn_unit) * 148, fc_unit),  # 19+59*2+11 = 148
+            nn.Dropout(0.25),
+            nn.ReLU()
+        )
+        self.fc2 = nn.Sequential(
+            nn.Linear(fc_unit, hidden_per_pitch*88),
+            nn.ReLU()
+        )
+        self.group_conv1 = nn.Conv1d(hidden_per_pitch*2*88, hidden_per_pitch*2*88, 1, padding=0, groups=88)
+        self.group_conv2 = nn.Conv1d(hidden_per_pitch*2*88, hidden_per_pitch*2*88, 1, padding=0, groups=88)
+        self.group_conv3 = nn.Conv1d(hidden_per_pitch*2*88, hidden_per_pitch*2*88, 1, padding=0, groups=88)
+
+        self.layernorm = nn.LayerNorm([hidden_per_pitch*2, 88])
+
+    def forward(self, mel_low, mel_high, spec):
+        batch_size = mel_low.shape[0]
+        # lowest freq
+        lowest = spec.unsqueeze(1)  # B 1 L F
+        lowest = lowest.transpose(2,3)  # B 1 F L
+        lowest = self.cnn_lowest(lowest)
+        # middle
+        low = mel_low.unsqueeze(1)  # B 1 L F
+        low = low.transpose(2,3)  # B 1 F L
+        low = self.cnn_low(low)  # B C F L
+        # do the same on high
+        high = mel_high.unsqueeze(1)  # B 1 L F
+        high = high.transpose(2,3)  # B 1 F L
+        high = self.cnn_high(high)  # B C F L
+
+        conv_feature = th.cat([low, F.max_pool2d(high, (2,1))], dim=2)
         fc_feature = th.cat([lowest, low, high], dim=2)
 
         conv_x = F.pad(conv_feature, (self.win_bw, self.win_fw, 32, 88+28-78))
