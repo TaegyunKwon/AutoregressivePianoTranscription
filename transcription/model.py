@@ -107,10 +107,10 @@ class ARModel(nn.Module):
                                 use_film=config.film)
         elif self.model == 'PAR_Mel2':
             self.acoustic = PAR_Mel2(config.cnn_unit, config.fc_unit,
-                                config.win_fw, config.win_bw, config.hidden_per_pitch,
+                                config.win_fw, config.win_bw, config.hidden_per_pitch//2,
                                 use_film=config.film)
             self.vel_acoustic = PAR_Mel2(config.cnn_unit, config.fc_unit,
-                                config.win_fw, config.win_bw, config.hidden_per_pitch,
+                                config.win_fw, config.win_bw, config.hidden_per_pitch//2,
                                 use_film=config.film)
             
         else:
@@ -286,7 +286,7 @@ class ARModel(nn.Module):
             conv_out = self.acoustic(mel)  # B x T x hidden_per_pitch x 88
             vel_conv_out = self.vel_acoustic(mel) # B x T x hidden_per_pitch x 88
 
-            return conv_out, vel_conv_out, 
+            return conv_out, vel_conv_out
 
     def recurrent_step(self, z, vel_z, c, h, vel_h):
         # z: B x T x hidden x 88
@@ -743,7 +743,7 @@ class PAR_Mel2(nn.Module):
         x = F.relu(self.group_conv3(x))
         x = x.view(x.shape[0], self.hidden_per_pitch*2, 88, -1).permute(0, 3, 1, 2)
 
-        return F.relu(self.layernorm(x)), fc_feature
+        return F.relu(self.layernorm(x)), fc_feature.detach()
 
 class PAR_CQT_v2(nn.Module):
     # two-path model

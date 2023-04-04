@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from collections import defaultdict
 from tqdm import tqdm
 from datetime import datetime
+import matplotlib.pyplot as plt
 
 import torch as th
 import torch.distributed as dist
@@ -198,7 +199,7 @@ def train_step(model, batch, loss_fn, optimizer, scheduler, device, config):
     shifted_vel = batch['velocity'].to(device)
     last_onset_time = batch['last_onset_time'].to(device)
     last_onset_vel = batch['last_onset_vel'].to(device)
-    frame_out, vel_out = model(audio, shifted_label[:, :-1], 
+    frame_out, vel_out, feature, vel_feature = model(audio, shifted_label[:, :-1], 
                                 last_onset_time[:, :-1], last_onset_vel[:, :-1], 
                                 random_condition=config.noisy_condition)
     # frame out: B x T x 88 x 5
@@ -211,7 +212,7 @@ def train_step(model, batch, loss_fn, optimizer, scheduler, device, config):
 
     optimizer.step()
     scheduler.step()
-    return loss, vel_loss
+    return loss, vel_loss, feature, vel_feature
     
 def valid_step(model, batch, loss_fn, device, config):
     audio = batch['audio'].to(device)
@@ -343,21 +344,24 @@ def train(rank, world_size, config, ddp=True):
                 break
             if rank ==0: loop.update(1)
             model.train()
-            loss, vel_loss = train_step(model, batch, loss_fn, optimizer, scheduler, device, config)
+            loss, vel_loss, feature, vel_feature = train_step(model, batch, loss_fn, optimizer, scheduler, device, config)
             if rank == 0:
                 run.log({"train": dict(frame_loss=loss.mean(), vel_loss=vel_loss.mean())}, step=step)
-            del loss, vel_loss, batch
+                # for every 100 step, log the feature as image
+                # plt.figure(figsize=(10, 10))
+                # plt.imshow(feature[0].detach().cpu().numpy().T, aspect='auto', origin='lower')
+            del loss, vel_loss, batch, feature, vel_feature
             if step % config.valid_interval == 0 or step == 5000:
                 model.eval()
 
                 validation_metric = defaultdict(list)
                 with th.no_grad():
-                    for batch in data_loader_valid:
+                    for n_valid, batch in enumerate(data_loader_valid):
                         batch_metric, _, _ = valid_step(model, batch, loss_fn, device, config)
                         for k, v in batch_metric.items():
                             validation_metric[k].extend(v)
-                        if config.debug:
-                            break
+                        # if config.debug and n_valid>4:
+                        #     break
                             
                 valid_mean = defaultdict(list)
                 if ddp:
@@ -372,7 +376,7 @@ def train(rank, world_size, config, ddp=True):
                 else:
                     for k,v in validation_metric.items():
                         if 'loss' in k:
-                            valid_mean[k] = th.mean(th.cat(th.stack(v).cpu()))
+                            valid_mean[k] = th.mean(th.stack(v).cpu())
                         else:
                             valid_mean[k] = np.mean(np.concatenate(v))
                 
