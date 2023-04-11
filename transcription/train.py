@@ -11,6 +11,7 @@ from collections import defaultdict
 from tqdm import tqdm
 from datetime import datetime
 import matplotlib.pyplot as plt
+import time
 
 import torch as th
 import torch.distributed as dist
@@ -224,7 +225,7 @@ def valid_step(model, batch, loss_fn, device, config):
     validation_metric = defaultdict(list)
     for n in range(audio.shape[0]):
         sample = frame_out[n].argmax(dim=-1)
-        metrics = evaluate(sample, shifted_label[n][1:], vel_out[n], shifted_vel[n][1:])
+        metrics = evaluate(sample, shifted_label[n][1:], vel_out[n], shifted_vel[n][1:], band_eval=True)
         for k, v in metrics.items():
             validation_metric[k].append(v)
     validation_metric['frame_loss'] = loss.mean(dim=(1,2))
@@ -249,7 +250,7 @@ def test_step(model, batch, device):
         vel_outs.append(vel)
         sample = frame.argmax(dim=-1)
         metrics = evaluate(sample, batch['label'][n].detach().cpu()[1:],
-                           vel, batch['velocity'][n].detach().cpu()[1:])
+                           vel, batch['velocity'][n].detach().cpu()[1:], band_eval=True)
         for k, v in metrics.items():
             test_metric[k].append(v)
     
@@ -488,11 +489,9 @@ def train(rank, world_size, config, ddp=True):
                     print(metric_string)
                     f.write(metric_string + '\n')
 
-    wandb.finish()
     if ddp:
         dist.barrier()
         cleanup()
-    wandb.finish()
         
     
     
