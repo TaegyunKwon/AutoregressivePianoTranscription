@@ -90,18 +90,16 @@ def evaluate(sample, label, sample_vel=None, vel_ref=None, band_eval=False):
         for band in range(4):
             if len(bands[f'i_ref_{band}']) == 0:
                 continue 
-            '''
             if len(bands[f'i_est_{band}']) == 0:
                 metrics[f'metric/note_band{band}/precision'].append(0.0)
                 metrics[f'metric/note_band{band}/recall'].append(0.0)
                 metrics[f'metric/note_band{band}/f1'].append(0.0)
-                metrics[f'metric/note_band{band}/overlap'].append(o)
-                metrics[f'metric/note_band{band}_w_offset/precision'].append(p)
-                metrics[f'metric/note_band{band}_w_offset/recall'].append(r)
-                metrics[f'metric/note_band{band}_w_offset/f1'].append(f)
-                metrics[f'metric/note_band{band}_w_offset/overlap'].append(o)
+                metrics[f'metric/note_band{band}/overlap'].append(0.0)
+                metrics[f'metric/note_band{band}_w_offset/precision'].append(0.0)
+                metrics[f'metric/note_band{band}_w_offset/recall'].append(0.0)
+                metrics[f'metric/note_band{band}_w_offset/f1'].append(0.0)
+                metrics[f'metric/note_band{band}_w_offset/overlap'].append(0.0)
                 continue
-            '''
             p, r, f, o = evaluate_notes(
                 bands[f'i_ref_{band}'], bands[f'p_ref_{band}'],
                 bands[f'i_est_{band}'], bands[f'p_est_{band}'], offset_ratio=None)
