@@ -1,8 +1,8 @@
 {
     "model": "PC_v4",
-    "cnn_unit": 24,
-    "lstm_unit": 2,
-    "hidden_per_pitch": 2,
+    "cnn_unit": 48,
+    "lstm_unit": 12,
+    "hidden_per_pitch": 12,
     "shrink_channels": [4, 1],
     "batch_size": 16
 
