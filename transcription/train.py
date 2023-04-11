@@ -51,6 +51,7 @@ default_dict = dict(
     lstm_unit=48,
     hidden_per_pitch=48,
     fc_unit=768,
+    shrink_channels=[4,1],
     batch_size=12,
     pitchwise_lstm=True,
     film=True,
@@ -168,14 +169,11 @@ class ModelSaver():
         if len(self.top_n) > self.n_keep:
             del_list = self.top_n[self.n_keep:]
             self.top_n = self.top_n[:self.n_keep]
-            print(self.top_n, del_list)
             for save_name, score, step in del_list:
-                print(del_list)
                 if self.last_ckp == save_name:
                     self.top_n.append((save_name, score, step))
                     continue
                 (self.logdir / save_name).unlink()
-                print(f'Delete {save_name}')
 
 class Losses(nn.Module):
     def __init__(self):
@@ -199,7 +197,7 @@ def train_step(model, batch, loss_fn, optimizer, scheduler, device, config):
     shifted_vel = batch['velocity'].to(device)
     last_onset_time = batch['last_onset_time'].to(device)
     last_onset_vel = batch['last_onset_vel'].to(device)
-    frame_out, vel_out, feature, vel_feature = model(audio, shifted_label[:, :-1], 
+    frame_out, vel_out = model(audio, shifted_label[:, :-1], 
                                 last_onset_time[:, :-1], last_onset_vel[:, :-1], 
                                 random_condition=config.noisy_condition)
     # frame out: B x T x 88 x 5
@@ -212,7 +210,7 @@ def train_step(model, batch, loss_fn, optimizer, scheduler, device, config):
 
     optimizer.step()
     scheduler.step()
-    return loss, vel_loss, feature, vel_feature
+    return loss, vel_loss
     
 def valid_step(model, batch, loss_fn, device, config):
     audio = batch['audio'].to(device)
@@ -290,13 +288,17 @@ def train(rank, world_size, config, ddp=True):
                           rectify = False, print_change_log=False)
     if config.resume_dir:
         ckp = th.load(model_saver.logdir / model_saver.last_ckp, map_location={'cuda:0':f'cuda:{rank}'})
-        model.module.load_state_dict(ckp['model_state_dict'])
+        if ddp:
+            model.module.load_state_dict(ckp['model_state_dict'])
+        else:
+            model.load_state_dict(ckp['model_state_dict'])
         del ckp
         if not config.eval:
             ckp_opt = th.load(model_saver.logdir / model_saver.last_opt)
             optimizer.load_state_dict(ckp_opt)
             del ckp_opt
-        dist.barrier()
+        if ddp:
+            dist.barrier()
         
 
     if rank == 0:
@@ -314,20 +316,25 @@ def train(rank, world_size, config, ddp=True):
                             np.arange(len(valid_set), step=config.batch_size//world_size))[1:]  # the first segment is []
         target_segments = [el for n, el in enumerate(segments) if n%world_size == rank]
         valid_sampler = CustomSampler(target_segments)
+        data_loader_valid = DataLoader(
+            valid_set, batch_sampler=valid_sampler,
+            num_workers=config.n_workers,
+            pin_memory=False,
+        )
     else:
         train_sampler=None
-        valid_sampler=None
+        data_loader_valid = DataLoader(
+            valid_set, sampler=None,
+            batch_size=config.batch_size,
+            num_workers=config.n_workers,
+            pin_memory=False,
+        )
     data_loader_train = DataLoader(
         train_set, sampler=train_sampler,
         batch_size=config.batch_size//world_size,
         num_workers=config.n_workers,
         pin_memory=False,
         drop_last=True,
-    )
-    data_loader_valid = DataLoader(
-        valid_set, batch_sampler=valid_sampler,
-        num_workers=config.n_workers,
-        pin_memory=False
     )
 
     loss_fn = Losses()
@@ -344,13 +351,10 @@ def train(rank, world_size, config, ddp=True):
                 break
             if rank ==0: loop.update(1)
             model.train()
-            loss, vel_loss, feature, vel_feature = train_step(model, batch, loss_fn, optimizer, scheduler, device, config)
+            loss, vel_loss= train_step(model, batch, loss_fn, optimizer, scheduler, device, config)
             if rank == 0:
                 run.log({"train": dict(frame_loss=loss.mean(), vel_loss=vel_loss.mean())}, step=step)
-                # for every 100 step, log the feature as image
-                # plt.figure(figsize=(10, 10))
-                # plt.imshow(feature[0].detach().cpu().numpy().T, aspect='auto', origin='lower')
-            del loss, vel_loss, batch, feature, vel_feature
+            del loss, vel_loss, batch
             if step % config.valid_interval == 0 or step == 5000:
                 model.eval()
 
@@ -360,9 +364,21 @@ def train(rank, world_size, config, ddp=True):
                         batch_metric, _, _ = valid_step(model, batch, loss_fn, device, config)
                         for k, v in batch_metric.items():
                             validation_metric[k].extend(v)
-                        # if config.debug and n_valid>4:
-                        #     break
-                            
+                        # for first batch, log image of feature map. shape(feature) = B C F L
+                        if n_valid == 0 and rank == 0:
+                            '''
+                            # TODO: do this with hook
+                            visual_range = 1000
+                            for n in range(config.batch_size//world_size):
+                                fig, axes = plt.subplots(config.cnn_unit//6, 6, figsize=(8, 10))
+                                plt.axis('off')
+                                for m in range(config.cnn_unit):
+                                    axes[m//6, m%6].imshow(feature[n,m].numpy()[:,:visual_range], aspect='auto', origin='lower')
+                                plt.subplots_adjust(wspace=0, hspace=0)
+                                run.log({'valid':{f'fmap_{n}': plt}}, step=step)
+                                plt.close()
+                            '''
+
                 valid_mean = defaultdict(list)
                 if ddp:
                     output = [None for _ in range(world_size)]
@@ -481,13 +497,10 @@ def train(rank, world_size, config, ddp=True):
     
     
 def run_demo(demo_fn, world_size, config):
-    try:
-        mp.spawn(demo_fn,
-                args=(world_size, config),
-                nprocs=world_size,
-                join=True)
-    finally:
-        wandb.finish()
+    mp.spawn(demo_fn,
+            args=(world_size, config),
+            nprocs=world_size,
+            join=True)
     
 
 if __name__ == '__main__':
@@ -523,7 +536,7 @@ if __name__ == '__main__':
     config = SimpleNamespace(**config)
     if config.debug:
         config.valid_interval=5
-        config.valid_seq_len=160256
+        # config.valid_seq_len=160256
         config.iteration=50
 
     if args.resume_dir:
