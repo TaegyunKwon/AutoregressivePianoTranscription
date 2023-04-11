@@ -645,7 +645,7 @@ class PC_v4(nn.Module):
             nn.BatchNorm2d(cnn_unit),
         )
         if use_film:
-            self.cnn0.append(FilmLayer(n_mels, cnn_unit, hidden=16))
+            self.cnn0.append(FilmLayer(n_mels//4, cnn_unit, hidden=16))
         self.cnn0.append(nn.ReLU())
 
         self.cnn1 = nn.Sequential(
