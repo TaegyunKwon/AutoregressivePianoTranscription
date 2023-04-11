@@ -20,7 +20,7 @@ from .data import MAESTRO, MAESTRO_V3
 
 #  BASE       = ['off', 'offset', 'onset', 'sustain', 'reonset']
 eps = sys.float_info.epsilon
-def evaluate(sample, label, sample_vel=None, vel_ref=None):
+def evaluate(sample, label, sample_vel=None, vel_ref=None, band_eval=False):
     metrics = defaultdict(list)
     
     onset_est = ((sample == 2) + (sample == 4))
@@ -64,6 +64,60 @@ def evaluate(sample, label, sample_vel=None, vel_ref=None):
     metrics['metric/note-with-offsets/recall'].append(r)
     metrics['metric/note-with-offsets/f1'].append(f)
     metrics['metric/note-with-offsets/overlap'].append(o)
+
+    if band_eval:
+        bands = defaultdict(list)
+        band_edges = midi_to_hz(np.arange(21+22, 108, step=22))
+        def get_band(p, i, type='ref'):
+            for n in range(len(p)):
+                if p[n] < band_edges[0]:
+                    bands[f'p_{type}_0'].append(p[n])
+                    bands[f'i_{type}_0'].append(i[n])
+                elif p[n] < band_edges[1]:
+                    bands[f'p_{type}_1'].append(p[n])
+                    bands[f'i_{type}_1'].append(i[n])
+                elif p[n] < band_edges[2]:
+                    bands[f'p_{type}_2'].append(p[n])
+                    bands[f'i_{type}_2'].append(i[n])
+                else:
+                    bands[f'p_{type}_3'].append(p[n])
+                    bands[f'i_{type}_3'].append(i[n])
+        get_band(p_ref, i_ref, type='ref')
+        get_band(p_est, i_est, type='est')
+                    
+        for k, v in bands.items():
+            bands[k] = np.asarray(v)
+        for band in range(4):
+            if len(bands[f'i_ref_{band}']) == 0:
+                continue 
+            '''
+            if len(bands[f'i_est_{band}']) == 0:
+                metrics[f'metric/note_band{band}/precision'].append(0.0)
+                metrics[f'metric/note_band{band}/recall'].append(0.0)
+                metrics[f'metric/note_band{band}/f1'].append(0.0)
+                metrics[f'metric/note_band{band}/overlap'].append(o)
+                metrics[f'metric/note_band{band}_w_offset/precision'].append(p)
+                metrics[f'metric/note_band{band}_w_offset/recall'].append(r)
+                metrics[f'metric/note_band{band}_w_offset/f1'].append(f)
+                metrics[f'metric/note_band{band}_w_offset/overlap'].append(o)
+                continue
+            '''
+            p, r, f, o = evaluate_notes(
+                bands[f'i_ref_{band}'], bands[f'p_ref_{band}'],
+                bands[f'i_est_{band}'], bands[f'p_est_{band}'], offset_ratio=None)
+            metrics[f'metric/note_band{band}/precision'].append(p)
+            metrics[f'metric/note_band{band}/recall'].append(r)
+            metrics[f'metric/note_band{band}/f1'].append(f)
+            metrics[f'metric/note_band{band}/overlap'].append(o)
+
+            p, r, f, o = evaluate_notes(
+                bands[f'i_ref_{band}'], bands[f'p_ref_{band}'],
+                bands[f'i_est_{band}'], bands[f'p_est_{band}'])
+            metrics[f'metric/note_band{band}_w_offset/precision'].append(p)
+            metrics[f'metric/note_band{band}_w_offset/recall'].append(r)
+            metrics[f'metric/note_band{band}_w_offset/f1'].append(f)
+            metrics[f'metric/note_band{band}_w_offset/overlap'].append(o)
+        
 
     p, r, f, o = evaluate_notes_with_velocity(i_ref, p_ref, v_ref, i_est, p_est, v_est,
                                                 offset_ratio=None, velocity_tolerance=0.1)
