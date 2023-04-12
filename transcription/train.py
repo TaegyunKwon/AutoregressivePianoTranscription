@@ -10,7 +10,6 @@ from types import SimpleNamespace
 from collections import defaultdict
 from tqdm import tqdm
 from datetime import datetime
-import matplotlib.pyplot as plt
 import time
 
 import torch as th

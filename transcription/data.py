@@ -104,7 +104,7 @@ class PianoSampleDataset(Dataset):
 
         audio_path = self.data_path[index][0]
         result = dict(path=audio_path)
-        def th_load_from_memmap(path, dtype, offset, shape, cast_type=None):
+        def th_load_from_memmap(path, dtype, offset=None, shape=None, cast_type=None):
             if cast_type is not None:
                 tensor = th.from_numpy(
                     np.memmap(path, dtype=dtype, offset=offset, shape=shape, mode='c').astype(cast_type))
@@ -164,7 +164,7 @@ class PianoSampleDataset(Dataset):
             result['time'] = begin / SR 
         else: # use whole sequence at ones; padding
             audio = th_load_from_memmap(
-                audio_path.replace('.flac', '_audio.npy'), 'int16', cast_type=np.float32)
+                audio_path.replace('.flac', '_audio.npy'), 'int16', 0, total_audio_length, cast_type=np.float32)
             pad_len = math.ceil(total_audio_length / HOP) * HOP - total_audio_length
             result['audio'] = F.pad(audio, (0, pad_len))
             for el in self.frame_features:
@@ -191,8 +191,8 @@ class PianoSampleDataset(Dataset):
         
         # last_onset_time = last_onset_time.float()
         # last_onset_vel = last_onset_vel.float()
-        last_onset_time = result['last_onset_time']
-        last_onset_vel = result['last_onset_vel']
+        last_onset_time = result['last_onset_time'] * frame_mask
+        last_onset_vel = result['last_onset_vel'] * frame_mask
         if self.transform:
             last_onset_time = uniform_augmentation(last_onset_time, 0.2, 0.3)
             last_onset_vel = uniform_augmentation(last_onset_vel, 0.2, 0.3)
@@ -210,7 +210,7 @@ class PianoSampleDataset(Dataset):
         for n in range(len(self)):
             audio_path = self.data_path[n][0]
             meta_path = audio_path.replace('.flac', '_meta.pt')
-            step_len = th.load(meta_path)['step_len']
+            step_len = th.load(meta_path)['n_steps']
             step_lens.append(step_len)
         self.data_path = [x for _, x in sorted(zip(step_lens, self.data_path),
                           key=lambda pair: pair[0], reverse=True)]
