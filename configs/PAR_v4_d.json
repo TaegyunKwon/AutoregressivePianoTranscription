@@ -1,0 +1,14 @@
+{
+    "model": "PC_v4",
+    "cnn_unit": 48,
+    "lstm_unit": 48,
+    "hidden_per_pitch": 48,
+    "shrink_channels": [12, 12],
+    "batch_size": 16,
+    "noisy_condition": false,
+    "win_fw": 4,
+    "win_bw": 0,
+    "pitchwise_lstm": true,
+    "film": true
+
+}
