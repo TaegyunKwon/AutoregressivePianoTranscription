@@ -487,7 +487,7 @@ def train(rank, world_size, config, ddp=True):
                     metric_string = f'{key:>32}: {th.mean(value)*100:.3f} +- {th.std(value)*100:.3f}'
                     print(metric_string)
                     f.write(metric_string + '\n')
-
+        wandb.finish()
     if ddp:
         dist.barrier()
         cleanup()
