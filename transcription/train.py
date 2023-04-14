@@ -416,7 +416,10 @@ def train(rank, world_size, config, ddp=True):
     SAVE_PATH.mkdir(exist_ok=True)
     map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
     ckp = th.load(model_saver.logdir / model_saver.best_ckp, map_location=map_location)
-    model.module.load_state_dict(ckp['model_state_dict'])
+    if ddp:
+        model.module.load_state_dict(ckp['model_state_dict'])
+    else:
+        model.load_state_dict(ckp['model_state_dict'])
     
     test_set = get_dataset(config, ['test'], sample_len=None,
                             random_sample=False, transform=False)
