@@ -210,7 +210,7 @@ class PianoSampleDataset(Dataset):
         for n in range(len(self)):
             audio_path = self.data_path[n][0]
             meta_path = audio_path.replace('.flac', '_meta.pt')
-            step_len = th.load(meta_path)['step_len']
+            step_len = th.load(meta_path)['n_steps']
             step_lens.append(step_len)
         self.data_path = [x for _, x in sorted(zip(step_lens, self.data_path),
                           key=lambda pair: pair[0], reverse=True)]
