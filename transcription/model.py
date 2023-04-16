@@ -105,6 +105,13 @@ class ARModel(nn.Module):
             self.vel_acoustic = PC_v6(config.n_mels, config.cnn_unit,
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
                                 use_film=config.film, shrink_channels=config.shrink_channels)
+        elif self.model == 'PC_v7':
+            self.acoustic = PC_v7(config.n_mels, config.cnn_unit,
+                                config.win_fw, config.win_bw, config.hidden_per_pitch,
+                                use_film=config.film, shrink_channels=config.shrink_channels)
+            self.vel_acoustic = PC_v7(config.n_mels, config.cnn_unit,
+                                config.win_fw, config.win_bw, config.hidden_per_pitch,
+                                use_film=config.film, shrink_channels=config.shrink_channels)
         elif self.model == 'PC_CQT':
             self.acoustic = PC_CQT(config.n_mels, config.cnn_unit,
                                 config.win_fw, config.win_bw, config.hidden_per_pitch//2,
@@ -883,6 +890,96 @@ class PC_v6(nn.Module):
         x_0 = self.pitch_fc_path0(x_0)  # B L 88H
         x_0 = x_0.view(batch_size, -1, self.hidden_per_pitch, 88)
         x_cat = self.layernorm(0)
+        x_cat = F.relu(x_cat) # B L H 88
+
+        return x_cat
+
+class PC_v7(nn.Module):
+    # simiar to PC_v4, but original conv stacks, no mulit-step at the last.
+    def __init__(self, n_mels, cnn_unit, win_fw, win_bw, hidden_per_pitch, use_film, shrink_channels=[4,1]):
+        super().__init__()
+
+        self.win_fw = win_fw
+        self.win_bw = win_bw
+        self.hidden_per_pitch = hidden_per_pitch
+        # input is batch_size * 1 * frames * 700
+        
+        self.cnn0 = nn.Sequential(
+            nn.Conv2d(1, cnn_unit, (5, 5), padding=2),
+            nn.MaxPool2d((1, 4)),
+            nn.BatchNorm2d(cnn_unit),
+        )
+        if use_film:
+            self.cnn0.append(FilmLayer(n_mels//4, cnn_unit, hidden=16))
+        self.cnn0.append(nn.ReLU())
+
+        self.cnn1 = nn.Sequential(
+            nn.Conv2d(cnn_unit, cnn_unit, (3, 1), padding=(1,0)),
+            nn.BatchNorm2d(cnn_unit),
+        )
+        if use_film:
+            self.cnn1.append(FilmLayer(n_mels//4, cnn_unit, hidden=16))
+        self.cnn1.append(nn.ReLU())
+
+        self.cnn2 = nn.Sequential(
+            nn.Conv2d(cnn_unit, cnn_unit, (3, 1), padding=(1, 0)),
+            nn.BatchNorm2d(cnn_unit),
+        )
+        if use_film:
+            self.cnn2.append(FilmLayer(n_mels//4, cnn_unit, hidden=16))
+        self.cnn2.append(nn.ReLU())
+
+        self.large_conv = nn.Sequential(
+            nn.ZeroPad2d((59, 0, win_bw, win_fw)),
+            nn.Conv2d(cnn_unit, cnn_unit, (win_fw+win_bw+1, 60)),
+            nn.BatchNorm2d(cnn_unit),
+        )
+        if use_film:
+            self.large_conv.append(FilmLayer(n_mels//4, cnn_unit, hidden=16))
+        self.large_conv.append(nn.ReLU())
+        
+        s_channels = shrink_channels
+        self.shrink_conv_path0 = nn.Sequential(
+            nn.Conv2d(cnn_unit, s_channels[0], (1, 1)),
+            nn.BatchNorm2d(s_channels[0]),
+            nn.ReLU(),
+            nn.Conv2d(s_channels[0], s_channels[1], (1, 1)),
+            nn.ReLU()
+            )
+
+        self.pitch_fc_path0 = nn.Linear(n_mels//4*s_channels[1], 88*hidden_per_pitch//2)
+
+        self.shrink_conv_path1 = nn.Sequential(
+            nn.Conv2d(cnn_unit, s_channels[0], (1, 1)),
+            nn.BatchNorm2d(s_channels[0]),
+            nn.ReLU(),
+            nn.Conv2d(s_channels[0], s_channels[1], (1, 1)),
+            nn.ReLU()
+            )
+        self.pitch_fc_path1 = nn.Linear(n_mels//4*s_channels[1], 88*hidden_per_pitch//2)
+        self.layernorm = nn.LayerNorm([hidden_per_pitch, 88])
+            
+
+    def forward(self, mel):
+        batch_size = mel.shape[0]
+        x = mel.unsqueeze(1)  # B 1 L F
+        x = self.cnn0(x)  # B C L F
+        x = self.cnn1(x)
+        x = self.cnn2(x)
+
+        x_0 = self.large_conv(x)
+        x_0 = self.shrink_conv_path0(x_0)
+        x_0 = x_0.permute(0, 2, 1, 3).flatten(-2) # B L C
+        x_0 = self.pitch_fc_path0(x_0)  # B L 88H
+        x_0 = x_0.view(batch_size, -1, self.hidden_per_pitch//2, 88)
+
+        x_1 = self.shrink_conv_path1(x)
+        x_1 = x_1.permute(0, 2, 1, 3).flatten(-2) # B L C
+        x_1 = self.pitch_fc_path1(x_1)  # B L 88H
+        x_1 = x_1.view(batch_size, -1, self.hidden_per_pitch//2, 88)
+
+        x_cat = th.cat([x_0, x_1], dim=2).permute(0, 2, 1, 3).transpose(1,2) # B L H 88
+        x_cat = self.layernorm(x_cat)
         x_cat = F.relu(x_cat) # B L H 88
 
         return x_cat
