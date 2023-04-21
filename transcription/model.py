@@ -136,17 +136,17 @@ class ARModel(nn.Module):
         elif self.model == 'PC_v8_bis':
             self.acoustic = PC_v8_bis(config.n_mels, config.cnn_unit,
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
-                                use_film=config.film, shrink_channels=config.shrink_channels)
+                                use_film=config.film)
             self.vel_acoustic = PC_v8_bis(config.n_mels, config.cnn_unit,
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
-                                use_film=config.film, shrink_channels=config.shrink_channels)
+                                use_film=config.film)
         elif self.model == 'PC_v9':
             self.acoustic = PC_v9(config.n_mels, config.cnn_unit,
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
-                                use_film=config.film, shrink_channels=config.shrink_channels)
+                                use_film=config.film)
             self.vel_acoustic = PC_v9(config.n_mels, config.cnn_unit,
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
-                                use_film=config.film, shrink_channels=config.shrink_channels)
+                                use_film=config.film)
         elif self.model == 'PC_CQT':
             self.acoustic = PC_CQT(config.n_mels, config.cnn_unit,
                                 config.win_fw, config.win_bw, config.hidden_per_pitch//2,
@@ -773,7 +773,7 @@ class PAR_v3(nn.Module):
     
 class PC_v8(nn.Module):
     # Compact verision of PAR_v2
-    def __init__(self, n_mels, cnn_unit, fc_unit, win_fw, win_bw, hidden_per_pitch, use_film):
+    def __init__(self, n_mels, cnn_unit, win_fw, win_bw, hidden_per_pitch, use_film):
         super().__init__()
 
         self.win_fw = win_fw
@@ -824,7 +824,7 @@ class PC_v8(nn.Module):
 
 class PC_v8_bis(nn.Module):
     # Compact verision of PAR_v2, multi-cnn fix, fc to conv1d
-    def __init__(self, n_mels, cnn_unit, fc_unit, win_fw, win_bw, hidden_per_pitch, use_film):
+    def __init__(self, n_mels, cnn_unit, win_fw, win_bw, hidden_per_pitch, use_film):
         super().__init__()
 
         self.win_fw = win_fw
@@ -850,12 +850,12 @@ class PC_v8_bis(nn.Module):
             )
 
         self.fc = nn.Sequential(
-            nn.Conv1d((n_mels // 4), self.hidden_per_pitch*88),
+            nn.Conv1d((n_mels // 4), self.hidden_per_pitch*88, 1),
             nn.Dropout(0.25),
             nn.ReLU()
         )
         # self.win_fc = nn.Linear(fc_unit*(win_fw+win_bw+1), hidden_per_pitch//2*88)
-        self.win_fc = nn.Conv2d(self.hidden_per_pitch, self.hidden_per_pitch, (1, self.win_fw+self.win_bw+1), groups=88)
+        self.win_fc = nn.Conv2d(self.hidden_per_pitch, self.hidden_per_pitch, (1, self.win_fw+self.win_bw+1))
         # self.pitch_linear = nn.Linear(fc_unit, self.hidden_per_pitch*88)
         self.bn = nn.BatchNorm2d(hidden_per_pitch)
 
@@ -868,8 +868,8 @@ class PC_v8_bis(nn.Module):
         fc_x = self.fc(x.squeeze(1)) # B 88H L
         fc_x = fc_x.reshape(batch_size, 88, self.hidden_per_pitch, -1) # B 88 H L
         fc_x = F.pad(fc_x, (self.win_bw, self.win_fw)) # B 88 H L 
-        multistep_x = self.win_fc(fc_x)
-        multistep_x = multistep_x.transpose(1,2) # B H 88 L 
+        multistep_x = self.win_fc(fc_x.transpose(1,2)) # B H 88 L 
+        multistep_x = multistep_x # B H 88 L 
         x = F.relu(self.bn(multistep_x))
         return x.permute(0, 3, 1, 2) # B L H 88
 
