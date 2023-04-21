@@ -872,10 +872,9 @@ class PC_v8_bis(nn.Module):
         multistep_x = multistep_x # B H 88 L 
         x = F.relu(self.bn(multistep_x))
         return x.permute(0, 3, 1, 2) # B L H 88
-
 class PC_v9(nn.Module):
     # Compact verision of PAR_v2
-    def __init__(self, n_mels, cnn_unit, fc_unit, win_fw, win_bw, hidden_per_pitch, use_film):
+    def __init__(self, n_mels, cnn_unit, win_fw, win_bw, hidden_per_pitch, use_film):
         super().__init__()
 
         self.win_fw = win_fw
@@ -900,7 +899,7 @@ class PC_v9(nn.Module):
             )
 
         self.fc = nn.Sequential(
-            nn.Conv1d((n_mels // 4), self.hidden_per_pitch*88), 1,
+            nn.Conv1d((n_mels // 4), self.hidden_per_pitch*88, 1),
             nn.Dropout(0.25),
             nn.ReLU()
         )
@@ -908,7 +907,7 @@ class PC_v9(nn.Module):
         self.fc_1 = nn.Conv1d(hidden_per_pitch*88, hidden_per_pitch*88, 1, padding=0, groups=88)
         self.fc_2 = nn.Conv1d(hidden_per_pitch*88, hidden_per_pitch*88, 1, padding=0, groups=88)
         # self.win_fc = nn.Linear(fc_unit*(win_fw+win_bw+1), hidden_per_pitch//2*88)
-        self.win_fc = nn.Conv2d(self.hidden_per_pitch, self.hidden_per_pitch, (1, self.win_fw+self.win_bw+1), groups=88)
+        self.win_fc = nn.Conv2d(self.hidden_per_pitch, self.hidden_per_pitch, (1, self.win_fw+self.win_bw+1))
         # self.pitch_linear = nn.Linear(fc_unit, self.hidden_per_pitch*88)
 
     def forward(self, mel):
@@ -918,13 +917,13 @@ class PC_v9(nn.Module):
         x = self.cnn(x)  # B C F L
         x = self.shrink(x) # B 1 F L
         fc_x = self.fc(x.squeeze(1)) # B 88H L
-        fc_x = self.fc1(fc_x)
-        fc_x = self.fc2(fc_x)
+        fc_x = self.fc_1(fc_x)
+        fc_x = self.fc_2(fc_x)
         fc_x = fc_x.reshape(batch_size, self.hidden_per_pitch, 88, -1)
         fc_x = F.pad(fc_x, (self.win_bw, self.win_fw)) # B H 88 L 
         multistep_x = self.win_fc(fc_x)
         return multistep_x.permute(0, 3, 1, 2) # B L H 88
-
+        
 class PC_v4(nn.Module):
     # two fc path, one with large conv. Channel last
     def __init__(self, n_mels, cnn_unit, win_fw, win_bw, hidden_per_pitch, use_film, shrink_channels=[4,1]):
