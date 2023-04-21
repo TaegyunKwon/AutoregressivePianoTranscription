@@ -249,7 +249,7 @@ def test_step(model, batch, device):
         vel_outs.append(vel)
         sample = frame.argmax(dim=-1)
         metrics = evaluate(sample, batch['label'][n].detach().cpu()[1:],
-                           vel, batch['velocity'][n].detach().cpu()[1:], band_eval=True)
+                           vel, batch['velocity'][n].detach().cpu()[1:], band_eval=False)
         for k, v in metrics.items():
             test_metric[k].append(v)
     
@@ -446,7 +446,6 @@ def train(rank, world_size, config, ddp=True):
     with th.no_grad():
         for batch in iterator:
             batch_metric, preds, vel_preds = test_step(model, batch, device)
-
             for k, v in batch_metric.items():
                 test_metrics[k].extend(v)
             for n in range(len(preds)):
