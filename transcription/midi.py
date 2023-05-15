@@ -50,7 +50,7 @@ def parse_midi(path, threshold=64):
     return np.array(notes)
 
 
-def parse_pedal(path):
+def parse_pedal(path, threshold=64):
     """open midi file and return np.array of (pedal_on, pedal_off) rows"""
     midi = mido.MidiFile(path)
 
@@ -66,21 +66,21 @@ def parse_pedal(path):
         time += message.time
 
         if message.type == 'control_change':
-            if message.control == 64 and (message.value >= 64) != sustain:
+            if message.control == 64 and (message.value >= threshold) != sustain:
                 # sustain pedal state has just changed
-                sustain = message.value >= 64
+                sustain = message.value >= threshold
                 event_type = 'on' if sustain else 'off'
                 event = dict(index=len(sustein_events), time=time, type=event_type, note=None, velocity=0)
                 sustein_events.append(event)
-            elif message.control == 66 and (message.value >= 64) != sostenuto:
+            elif message.control == 66 and (message.value >= threshold) != sostenuto:
                 # sustain pedal state has just changed
-                sostenuto = message.value >= 64
+                sostenuto = message.value >= threshold
                 event_type = 'on' if sostenuto else 'off'
                 event = dict(index=len(sostenuto_events), time=time, type=event_type, note=None, velocity=0)
                 sostenuto_events.append(event)
-            elif message.control == 67 and (message.value >= 64) != soft:
+            elif message.control == 67 and (message.value >= threshold) != soft:
                 # sustain pedal state has just changed
-                soft = message.value >= 64
+                soft = message.value >= threshold
                 event_type = 'on' if soft else 'off'
                 event = dict(index=len(soft_events), time=time, type=event_type, note=None, velocity=0)
                 soft_events.append(event)

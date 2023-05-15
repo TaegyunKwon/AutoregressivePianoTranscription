@@ -15,6 +15,7 @@ import time
 import torch as th
 import torch.distributed as dist
 import torch.nn as nn
+from torch.nn import functional as F
 from torch.nn.utils import clip_grad_norm_
 import torch.optim as optim
 import torch.multiprocessing as mp
@@ -29,11 +30,11 @@ import wandb
 from adabelief_pytorch import AdaBelief
 
 from .model import ARModel
-from .data import MAESTRO_V3, MAESTRO
+from .constants import HOP
+from .data import MAESTRO_V3, MAESTRO, MAPS, EmotionDataset, SMD, ViennaCorpus
 from .loss import FocalLoss
 from .evaluate import evaluate
 from .utils import summary, CustomSampler
-from .transcribe import PadCollate, transcribe
 
 th.autograd.set_detect_anomaly(True)
 os.environ["WANDB_DISABLE_SERVICE"] = "true"
@@ -42,7 +43,7 @@ def remove_progress(captured_out):
     lines = (line for line in captured_out.splitlines() if ('it/s]' not in line) and ('s/it]' not in line))
     return '\n'.join(lines)
 
-default_dict = dict(
+default_config = dict(
     n_mels=700,
     n_fft=4096,
     f_min=27.5,
@@ -88,10 +89,22 @@ def cleanup():
 def get_dataset(config, split, sample_len=160256, random_sample=False, transform=False, load_mode='lazy'):
     if config.dataset == 'MAESTRO_V3':
         return MAESTRO_V3(groups=split, sequence_length=sample_len, 
-                          random_sample=random_sample, transform=transform, load_mode=load_mode)
+                          random_sample=random_sample, transform=transform)
     elif config.dataset == 'MAESTRO_V1':
         return MAESTRO(groups=split, sequence_length=sample_len, 
-                          random_sample=random_sample, transform=transform, load_mode=load_mode)
+                          random_sample=random_sample, transform=transform)
+    elif config.dataset == 'MAPS':
+        return MAPS(groups=split, sequence_length=sample_len, 
+                          random_sample=random_sample, transform=transform)
+    elif config.dataset == 'Emotion':
+        return EmotionDataset(groups=split, sequence_length=sample_len, 
+                          random_sample=random_sample, transform=transform)
+    elif config.dataset == 'SMD':
+        return SMD(groups=split, sequence_length=sample_len, 
+                          random_sample=random_sample, transform=transform)
+    elif config.dataset == 'Vienna':
+        return ViennaCorpus(groups=split, sequence_length=sample_len, 
+                          random_sample=random_sample, transform=transform)
     else:
         raise KeyError
 
@@ -252,8 +265,28 @@ def test_step(model, batch, device):
                            vel, batch['velocity'][n].detach().cpu()[1:], band_eval=False)
         for k, v in metrics.items():
             test_metric[k].append(v)
+        print(f'{metrics["metric/note/f1"][0]:.4f}, {metrics["metric/note-with-offsets/f1"][0]:.4f}', batch['path'][n])
     
     return test_metric, frame_outs, vel_outs
+
+class PadCollate:
+    def __call__(self, data):
+        max_len = data[0]['audio'].shape[0] // HOP
+        
+        for datum in data:
+            step_len = datum['audio'].shape[0] // HOP
+            datum['step_len'] = step_len
+            pad_len = max_len - step_len
+            pad_len_sample = pad_len * HOP
+            datum['audio'] = F.pad(datum['audio'], (0, pad_len_sample))
+
+        batch = defaultdict(list)
+        for key in data[0].keys():
+            if key == 'audio':
+                batch[key] = th.stack([datum[key] for datum in data], 0)
+            else :
+                batch[key] = [datum[key] for datum in data]
+        return batch
 
 
 def train(rank, world_size, config, ddp=True):
@@ -300,114 +333,112 @@ def train(rank, world_size, config, ddp=True):
         if ddp:
             dist.barrier()
         
+    if not config.eval:
+        if rank == 0:
+            run.watch(model, log_freq=1000)
 
-    if rank == 0:
-        run.watch(model, log_freq=1000)
-
-    scheduler = StepLR(optimizer, step_size=5000, gamma=0.95)
-    train_set = get_dataset(config, ['train'], sample_len=config.seq_len, 
-                            random_sample=True, transform=config.noisy_condition, load_mode='lazy')
-    valid_set = get_dataset(config, ['validation'], sample_len=config.valid_seq_len,
-                            random_sample=False, transform=False, load_mode='lazy')
-    if ddp:
-        train_sampler = DistributedSampler(dataset=train_set, num_replicas=world_size, 
-                                        rank=rank, shuffle=True)
-        segments = np.split(np.arange(len(valid_set)),
-                            np.arange(len(valid_set), step=config.batch_size//world_size))[1:]  # the first segment is []
-        target_segments = [el for n, el in enumerate(segments) if n%world_size == rank]
-        valid_sampler = CustomSampler(target_segments)
-        data_loader_valid = DataLoader(
-            valid_set, batch_sampler=valid_sampler,
-            num_workers=config.n_workers,
-            pin_memory=False,
-        )
-    else:
-        train_sampler=None
-        data_loader_valid = DataLoader(
-            valid_set, sampler=None,
-            batch_size=config.batch_size,
-            num_workers=config.n_workers,
-            pin_memory=False,
-        )
-    data_loader_train = DataLoader(
-        train_set, sampler=train_sampler,
-        batch_size=config.batch_size//world_size,
-        num_workers=config.n_workers,
-        pin_memory=False,
-        drop_last=True,
-    )
-
-    loss_fn = Losses()
-
-    if rank == 0: loop = tqdm(range(step, config.iteration), total=config.iteration, initial=step)
-    for epoch in range(10000):
-        if config.eval:
-            break
+        scheduler = StepLR(optimizer, step_size=5000, gamma=0.95)
+        train_set = get_dataset(config, ['train'], sample_len=config.seq_len, 
+                                random_sample=True, transform=config.noisy_condition, load_mode='lazy')
+        valid_set = get_dataset(config, ['validation'], sample_len=config.valid_seq_len,
+                                random_sample=False, transform=False, load_mode='lazy')
         if ddp:
-            data_loader_train.sampler.set_epoch(epoch)
-        for batch in data_loader_train:
-            step += 1
-            if step > config.iteration:
-                break
-            if rank ==0: loop.update(1)
-            model.train()
-            loss, vel_loss= train_step(model, batch, loss_fn, optimizer, scheduler, device, config)
-            if rank == 0:
-                run.log({"train": dict(frame_loss=loss.mean(), vel_loss=vel_loss.mean())}, step=step)
-            del loss, vel_loss, batch
-            if step % config.valid_interval == 0 or step == 5000:
-                model.eval()
+            train_sampler = DistributedSampler(dataset=train_set, num_replicas=world_size, 
+                                            rank=rank, shuffle=True)
+            segments = np.split(np.arange(len(valid_set)),
+                                np.arange(len(valid_set), step=config.batch_size//world_size))[1:]  # the first segment is []
+            target_segments = [el for n, el in enumerate(segments) if n%world_size == rank]
+            valid_sampler = CustomSampler(target_segments)
+            data_loader_valid = DataLoader(
+                valid_set, batch_sampler=valid_sampler,
+                num_workers=config.n_workers,
+                pin_memory=False,
+            )
+        else:
+            train_sampler=None
+            data_loader_valid = DataLoader(
+                valid_set, sampler=None,
+                batch_size=config.batch_size,
+                num_workers=config.n_workers,
+                pin_memory=False,
+            )
+        data_loader_train = DataLoader(
+            train_set, sampler=train_sampler,
+            batch_size=config.batch_size//world_size,
+            num_workers=config.n_workers,
+            pin_memory=False,
+            drop_last=True,
+        )
 
-                validation_metric = defaultdict(list)
-                with th.no_grad():
-                    for n_valid, batch in enumerate(data_loader_valid):
-                        batch_metric, _, _ = valid_step(model, batch, loss_fn, device, config)
-                        for k, v in batch_metric.items():
-                            validation_metric[k].extend(v)
-                        # for first batch, log image of feature map. shape(feature) = B C F L
-                        if n_valid == 0 and rank == 0:
-                            '''
-                            # TODO: do this with hook
-                            visual_range = 1000
-                            for n in range(config.batch_size//world_size):
-                                fig, axes = plt.subplots(config.cnn_unit//6, 6, figsize=(8, 10))
-                                plt.axis('off')
-                                for m in range(config.cnn_unit):
-                                    axes[m//6, m%6].imshow(feature[n,m].numpy()[:,:visual_range], aspect='auto', origin='lower')
-                                plt.subplots_adjust(wspace=0, hspace=0)
-                                run.log({'valid':{f'fmap_{n}': plt}}, step=step)
-                                plt.close()
-                            '''
+        loss_fn = Losses()
 
-                valid_mean = defaultdict(list)
-                if ddp:
-                    output = [None for _ in range(world_size)]
-                    dist.gather_object(validation_metric, output if rank==0 else None, dst=0)
-                    if rank == 0:
+        if rank == 0: loop = tqdm(range(step, config.iteration), total=config.iteration, initial=step)
+        for epoch in range(10000):
+            if ddp:
+                data_loader_train.sampler.set_epoch(epoch)
+            for batch in data_loader_train:
+                step += 1
+                if step > config.iteration:
+                    break
+                if rank ==0: loop.update(1)
+                model.train()
+                loss, vel_loss= train_step(model, batch, loss_fn, optimizer, scheduler, device, config)
+                if rank == 0:
+                    run.log({"train": dict(frame_loss=loss.mean(), vel_loss=vel_loss.mean())}, step=step)
+                del loss, vel_loss, batch
+                if step % config.valid_interval == 0 or step == 5000:
+                    model.eval()
+
+                    validation_metric = defaultdict(list)
+                    with th.no_grad():
+                        for n_valid, batch in enumerate(data_loader_valid):
+                            batch_metric, _, _ = valid_step(model, batch, loss_fn, device, config)
+                            for k, v in batch_metric.items():
+                                validation_metric[k].extend(v)
+                            # for first batch, log image of feature map. shape(feature) = B C F L
+                            if n_valid == 0 and rank == 0:
+                                '''
+                                # TODO: do this with hook
+                                visual_range = 1000
+                                for n in range(config.batch_size//world_size):
+                                    fig, axes = plt.subplots(config.cnn_unit//6, 6, figsize=(8, 10))
+                                    plt.axis('off')
+                                    for m in range(config.cnn_unit):
+                                        axes[m//6, m%6].imshow(feature[n,m].numpy()[:,:visual_range], aspect='auto', origin='lower')
+                                    plt.subplots_adjust(wspace=0, hspace=0)
+                                    run.log({'valid':{f'fmap_{n}': plt}}, step=step)
+                                    plt.close()
+                                '''
+
+                    valid_mean = defaultdict(list)
+                    if ddp:
+                        output = [None for _ in range(world_size)]
+                        dist.gather_object(validation_metric, output if rank==0 else None, dst=0)
+                        if rank == 0:
+                            for k,v in validation_metric.items():
+                                if 'loss' in k:
+                                    valid_mean[k] = th.mean(th.cat([th.stack(el[k]).cpu() for el in output]))
+                                else:
+                                    valid_mean[k] = np.mean(np.concatenate([el[k] for el in output]))
+                    else:
                         for k,v in validation_metric.items():
                             if 'loss' in k:
-                                valid_mean[k] = th.mean(th.cat([th.stack(el[k]).cpu() for el in output]))
+                                valid_mean[k] = th.mean(th.stack(v).cpu())
                             else:
-                                valid_mean[k] = np.mean(np.concatenate([el[k] for el in output]))
-                else:
-                    for k,v in validation_metric.items():
-                        if 'loss' in k:
-                            valid_mean[k] = th.mean(th.stack(v).cpu())
-                        else:
-                            valid_mean[k] = np.mean(np.concatenate(v))
-                
-                if rank == 0:
-                    print(f'validation metric: step:{step}')
-                    run.log({'valid':valid_mean}, step=step)
-                    for key, value in valid_mean.items():
-                        if key[-2:] == 'f1' or 'loss' in key or key[-3:] == 'err':
-                            print(f'{key} : {value}')
-                    valid_mean['metric/note/f1']
-                    model_saver.update(model, optimizer, step, valid_mean['metric/note-with-offsets/f1'], ddp=ddp)
-                if ddp:
-                    dist.barrier()
-        if step > config.iteration:
-            break
+                                valid_mean[k] = np.mean(np.concatenate(v))
+                    
+                    if rank == 0:
+                        print(f'validation metric: step:{step}')
+                        run.log({'valid':valid_mean}, step=step)
+                        for key, value in valid_mean.items():
+                            if key[-2:] == 'f1' or 'loss' in key or key[-3:] == 'err':
+                                print(f'{key} : {value}')
+                        valid_mean['metric/note/f1']
+                        model_saver.update(model, optimizer, step, valid_mean['metric/note-with-offsets/f1'], ddp=ddp)
+                    if ddp:
+                        dist.barrier()
+            if step > config.iteration:
+                break
 
     # Test phase
     model.eval()
@@ -424,7 +455,7 @@ def train(rank, world_size, config, ddp=True):
     test_set = get_dataset(config, ['test'], sample_len=None,
                             random_sample=False, transform=False)
     test_set.sort_by_length()
-    batch_size = 6 # 6 for PAR model, 12G RAM (8 blocked by 8G shm size)
+    batch_size = 4 # 6 for PAR model, 12G RAM (8 blocked by 8G shm size)
     if ddp:
         segments = np.split(np.arange(len(test_set)),
                             np.arange(len(test_set), step=batch_size))[1:]  # the first segment is []
@@ -524,7 +555,7 @@ if __name__ == '__main__':
     parser.set_defaults(eval=False)
     
     args = parser.parse_args()
-    config = default_dict
+    config = default_config
     if args.config:
         with open(args.config, 'r') as j:
             update_config = json.load(j)
@@ -558,7 +589,10 @@ if __name__ == '__main__':
         Path(config.logdir).mkdir(exist_ok=True)
     print(config)
 
-    dataset = get_dataset(config, ['train', 'validation', 'test'], random_sample=False, transform=False)
+    if not config.eval:
+        dataset = get_dataset(config, ['train', 'validation', 'test'], random_sample=False, transform=False)
+    else:
+        dataset = get_dataset(config, None, random_sample=False, transform=False)
     dataset.initialize()
 
     

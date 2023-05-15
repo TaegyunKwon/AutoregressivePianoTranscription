@@ -2,11 +2,20 @@ from collections import defaultdict
 import math
 import tempfile
 from pathlib import Path
-import soundfile
+from types import SimpleNamespace
 import subprocess
-from transcription.constants import HOP
+
 import torch as th
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
+import numpy as np
+
+import soundfile
+from tqdm import tqdm
+
+from transcription.constants import HOP
+from transcription.model import ARModel
+from transcription.train import get_dataset, PadCollate
 
 
 def load_audio(audiofile):
@@ -44,21 +53,57 @@ def transcribe(model, audio_batch, step_len=None):
         vel_outs.append(vel_out[n,:step_len[n]])
     return outs, vel_outs
 
-class PadCollate:
-    def __call__(self, data):
-        max_len = data[0]['audio'].shape[0] // HOP
-        
-        for datum in data:
-            step_len = datum['audio'].shape[0] // HOP
-            datum['step_len'] = step_len
-            pad_len = max_len - step_len
-            pad_len_sample = pad_len * HOP
-            datum['audio'] = F.pad(datum['audio'], (0, pad_len_sample))
+def load_model(model_path, device):
+    ckp = th.load(model_path, map_location='cpu')
+    config = dict()
+    for k, v in ckp.items():
+        if k != 'model_state_dict':
+            config[k] = v
+    config = SimpleNamespace(**config)
+    model = ARModel(config).to(device)
+    model.load_state_dict(ckp['model_state_dict'])
+    model.eval()
 
-        batch = defaultdict(list)
-        for key in data[0].keys():
-            if key == 'audio':
-                batch[key] = th.stack([datum[key] for datum in data], 0)
-            else :
-                batch[key] = [datum[key] for datum in data]
-        return batch
+    return model, config
+
+def transcribe_with_lstm_out(model, config, save_folder, device='cuda'):
+    test_set = get_dataset(config, ['test'], sample_len=None,
+                            random_sample=False, transform=False)
+    test_set.sort_by_length()
+    batch_size = 1 # 6 for PAR model, 12G RAM (8 blocked by 8G shm size)
+    data_loader_test = DataLoader(
+        test_set, 
+        batch_size=batch_size,
+        num_workers=config.n_workers,
+        pin_memory=False,
+        collate_fn=PadCollate()
+        )
+
+    activation = []
+    def get_activation(model):
+        def hook(model, input, output):
+            activation.append(output[0].detach().cpu().numpy())
+        return hook
+        
+    model.lstm.register_forward_hook(get_activation(model.lstm))
+
+    iterator = data_loader_test
+    with th.no_grad():
+        for batch in tqdm(iterator):
+            audio = batch['audio'].to(device)
+            batch_size = audio.shape[0]
+            frame_out, vel_out = model(audio, last_states=None, random_condition=False, sampling='argmax')
+            lstm_activation = np.concatenate(activation, axis=0)
+            if config.pitchwise_lstm:
+                lstm_activation = lstm_activation.reshape(-1, batch_size, 88, 48)
+            for n in range(audio.shape[0]):
+                step_len = batch['step_len'][n]
+                lstm_out = lstm_activation[:step_len, n]
+                save_path = Path(save_folder) / (Path(batch['path'][n]).stem + '.npy')
+                np.save(save_path, lstm_out)
+            del lstm_activation, frame_out, vel_out, lstm_out
+        activation = [] 
+        
+if __name__ == '__main__':
+    model, config = load_model('runs/PAR_v2_230420-183632_PAR_v2_cp19/model_250k_0.8988.pt', 'cuda')
+    transcribe_with_lstm_out(model, config, save_folder='lstm_out/h')

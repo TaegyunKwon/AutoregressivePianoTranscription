@@ -284,7 +284,7 @@ class PianoSampleDataset(Dataset):
             if left > n_steps:
                 print(f'Warning: onset after audio ends {audio_length//SR}. {audio_path}. \
                       {onset},{offset},{note},{vel}')
-                return
+                break
 
             # off->off :0, on -> off :1, off->onset :2, on -> on :3, on -> onset :4,
             f = int(note) - MIN_MIDI
@@ -315,6 +315,8 @@ class PianoSampleDataset(Dataset):
         pedal = np.loadtxt(pedal_tsv_path, delimiter='\t', skiprows=1, ndmin=2)
 
         for onset, offset, pedal_type in pedal:
+            if onset >= audio_length / SR:
+                break
             left = int(round(onset * SR / HOP))
             onset_right = left + 1
             frame_right = int(round(offset * SR / HOP))
@@ -398,7 +400,7 @@ class MAESTRO_V3(PianoSampleDataset):
                  random_sample=True, transform=None, load_mode='lazy'):
         self.meta_file = meta_file
         self.path = Path(path)
-        super().__init__(self.path, groups, sequence_length, seed, random_sample, transform, load_mode=load_mode)
+        super().__init__(self.path, groups if groups is not None else ['test'], sequence_length, seed, random_sample, transform, load_mode=load_mode)
 
     @classmethod
     def available_groups(cls):
@@ -425,8 +427,8 @@ class MAESTRO_V3(PianoSampleDataset):
         
 
 class MAPS(PianoSampleDataset):
-    def __init__(self, path='data/MAPS', groups=None, sequence_length=None, seed=42, load_mode='ram', random_sample=True, delay=1, audio_transforms=None, last_time_transform=None, last_vel_transform=None):
-        super().__init__(path, groups if groups is not None else ['ENSTDkAm', 'ENSTDkCl'], sequence_length, seed, load_mode, random_sample, delay, audio_transforms, last_time_transform, last_vel_transform)
+    def __init__(self, path='data/MAPS', groups=None, sequence_length=None, seed=42, load_mode='ram', random_sample=True, transform=None):
+        super().__init__(path, ['ENSTDkAm', 'ENSTDkCl'] if groups in [None, ['test']] else groups, sequence_length, seed, random_sample, transform=transform, load_mode=load_mode)
 
     @classmethod
     def available_groups(cls):
@@ -456,10 +458,10 @@ class MAPS(PianoSampleDataset):
 
 class EmotionDataset(PianoSampleDataset):
     def __init__(self, path='data/Emotion', json_file='meta.json', groups=None, sequence_length=None, seed=42, load_mode='ram', random_sample=True, 
-                 delay=1, audio_transforms=None, last_time_transform=None, last_vel_transform=None):
+                 transform=None):
         self.json_file = json_file
-        super().__init__(path, groups if groups is not None else ['test'], sequence_length, seed, load_mode, random_sample,
-                         delay, audio_transforms, last_time_transform, last_vel_transform)
+        super().__init__(path, groups if groups is not None else ['test'], sequence_length, seed, random_sample,
+                        transform=transform,load_mode=load_mode)
         
     @classmethod
     def available_groups(cls):
@@ -500,8 +502,9 @@ class EmotionDataset(PianoSampleDataset):
 
 
 class SMD(PianoSampleDataset):
-    def __init__(self, path='data/SMD', groups=None, sequence_length=None, seed=42, load_mode='ram', random_sample=True, delay=1, audio_transforms=None, last_time_transform=None, last_vel_transform=None):
-        super().__init__(path, groups if groups is not None else ['test'], sequence_length, seed, load_mode, random_sample, delay, audio_transforms, last_time_transform, last_vel_transform)
+    def __init__(self, path='data/SMD', groups=None, sequence_length=None, seed=42, load_mode='ram', random_sample=True, transform=None):
+        super().__init__(path, groups if groups is not None else ['test'], sequence_length,  seed, random_sample,
+                        transform=transform,load_mode=load_mode )
 
     @classmethod
     def available_groups(cls):
@@ -529,11 +532,9 @@ class SMD(PianoSampleDataset):
         return result
 
 class ViennaCorpus(PianoSampleDataset):
-    def __init__(self, path='data/vienna_corpus', groups=None, sequence_length=None, seed=42, load_mode='ram', random_sample=True, 
-                 delay=1, audio_transforms=None, last_time_transform=None, last_vel_transform=None):
-        super().__init__(path, groups if groups is not None else ['test'], sequence_length, seed, load_mode, random_sample,
-                         delay, audio_transforms, last_time_transform, last_vel_transform)
-        
+    def __init__(self, path='data/vienna_align', groups=None, sequence_length=None, seed=42, load_mode='ram', random_sample=True, transform=None):
+        super().__init__(path, groups if groups is not None else ['test'], sequence_length,  seed, random_sample,
+                        transform=transform,load_mode=load_mode )
     @classmethod
     def available_groups(cls):
         return ['test']
@@ -542,17 +543,36 @@ class ViennaCorpus(PianoSampleDataset):
         midis = list(Path(self.path).glob('**/*_original.mid'))
         midis = [el for el in midis if 'average' not in el.name]
         files = sorted([(str(el.parent / el.name.replace('_original.mid', '.flac')), str(el)) for el in midis])
+        first_onset = dict()
+        with open(Path(self.path) / 'first_onset.txt', 'r') as f:
+            lines = f.readlines()
+            for line in lines:
+                filename = line.split(',')[0]
+                onset = float(line.split(',')[1])
+                if onset < 0.03:
+                    onset = 0.0
+                first_onset[filename] = onset
+        '''
+        midis = list(Path(self.path).glob('**/*_sync.mid'))
+        midis = [el for el in midis if 'average' not in el.name and 'original' not in el.name] 
+        files = sorted([(str(el.parent / el.name.replace('_sync.mid', '.flac')), str(el)) for el in midis])
+        '''
 
         result = []
 
         for audio_path, midi_path in tqdm(files, desc='Converting midi to tsv group %s' % group, ncols=100):
-            tsv_filename = midi_path.replace('.mid', '.tsv').replace('.mid', '.tsv')
-            if not tsv_filename.exists():
-                midi = parse_midi(midi_path)
+            tsv_filename = midi_path.replace('.mid', '.tsv')
+            if not Path(tsv_filename).exists():
+                midi = parse_midi(midi_path, threshold=21) # special threshold for vienna corpus
+                midi_onset = midi[0][0]
+                diff = midi_onset - first_onset[Path(audio_path).name] 
+                for i in range(len(midi)):
+                    midi[i][0] -= diff
+                    midi[i][1] -= diff
                 np.savetxt(tsv_filename, midi, fmt='%.6f', delimiter='\t', header='onset,offset,note,velocity')
                 pedal = parse_pedal(midi_path)
                 np.savetxt(tsv_filename.replace('.tsv', '_pedal.tsv'), pedal, fmt='%.6f', delimiter='\t', header='onset,offset,type')
-                result.append((audio_path, tsv_filename))
             else:
                 pass
             result.append((audio_path, tsv_filename))
+        return result
