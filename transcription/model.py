@@ -328,10 +328,14 @@ class ARModel(nn.Module):
                 cur_onset_time, cur_onset_vel = update_context(last_onset_time, last_onset_vel, arg_frame, arg_vel)
                 last_onset_time = cur_onset_time
                 last_onset_vel = cur_onset_vel 
-                context_enc = self.context_net(
-                    arg_frame.view(batch_size, 1, 88).to(audio.device),
-                    last_onset_time.view(batch_size, 1, 88, 1).to(audio.device).div(156),
-                    last_onset_vel.view(batch_size, 1, 88, 1).to(audio.device).div(128))
+                if self.enhanced_context:
+                    context_enc = self.context_net(
+                        arg_frame.view(batch_size, 1, 88).to(audio.device),
+                        last_onset_time.view(batch_size, 1, 88, 1).to(audio.device).div(313),
+                        last_onset_vel.view(batch_size, 1, 88, 1).to(audio.device).div(128))
+                else:
+                    context_enc = self.context_net(
+                        arg_frame.view(batch_size, 1, 88)).transpose(2,3).to(audio.device)
                 c = context_enc
 
             if return_softmax:
