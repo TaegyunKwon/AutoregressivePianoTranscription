@@ -27,7 +27,7 @@ class ARModel(nn.Module):
         else:
             self.frontend = transforms.MelSpectrogram(sample_rate=SR, n_fft=config.n_fft,
                 hop_length=HOP, f_min=config.f_min, f_max=config.f_max, n_mels=config.n_mels, normalized=False)
-
+        self.enhanced_context = config.enhanced_context
         if self.model == 'PAR':
             self.acoustic = PAR(config.n_mels, config.cnn_unit, config.fc_unit, 
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
@@ -38,10 +38,10 @@ class ARModel(nn.Module):
         elif self.model == 'PAR_v2':
             self.acoustic = PAR_v2(config.n_mels, config.cnn_unit, config.fc_unit, 
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
-                                use_film=config.film)
+                                use_film=config.film, cnn_widths=config.cnn_widths, multifc=config.multifc)
             self.vel_acoustic = PAR_v2(config.n_mels, config.cnn_unit, config.fc_unit, 
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
-                                use_film=config.film)
+                                use_film=config.film, cnn_widths=config.cnn_widths, multifc=config.multifc)
         elif self.model == 'PAR_v2_bn':
             self.acoustic = PAR_v2_bn(config.n_mels, config.cnn_unit, config.fc_unit, 
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
@@ -186,19 +186,23 @@ class ARModel(nn.Module):
         else:
             raise KeyError(f'wrong model:{self.model}')
             
-        # self.context_net = ContextNet(config.hidden_per_pitch, out_dim=4)
-        self.context_net = ContextNetJoint(config.hidden_per_pitch, out_dim=4)
+        if self.enhanced_context:
+            self.context_dim = 4
+            self.context_net = ContextNetJoint(config.hidden_per_pitch, out_dim=4)
+        else:
+            self.context_dim = 2
+            self.context_net = nn.Embedding(5, 2)
         if config.pitchwise_lstm:
-            self.lstm = nn.LSTM(config.hidden_per_pitch+4, config.lstm_unit, num_layers=2, batch_first=False, bidirectional=False)
+            self.lstm = nn.LSTM(config.hidden_per_pitch+self.context_dim, config.lstm_unit, num_layers=2, batch_first=False, bidirectional=False)
             self.output = nn.Linear(config.lstm_unit, 5)
 
-            self.vel_lstm = nn.LSTM(config.hidden_per_pitch*2+4, config.lstm_unit, num_layers=2, batch_first=False, bidirectional=False)
+            self.vel_lstm = nn.LSTM(config.hidden_per_pitch*2+self.context_dim, config.lstm_unit, num_layers=2, batch_first=False, bidirectional=False)
             self.vel_output = nn.Linear(config.lstm_unit, 1)
         else:
-            self.lstm = nn.LSTM((config.hidden_per_pitch+4)*88, config.lstm_unit, num_layers=2, batch_first=False, bidirectional=False)
+            self.lstm = nn.LSTM((config.hidden_per_pitch+self.context_dim)*88, config.lstm_unit, num_layers=2, batch_first=False, bidirectional=False)
             self.output = nn.Linear(config.lstm_unit, 88*5)
 
-            self.vel_lstm = nn.LSTM((config.hidden_per_pitch*2+4)*88, config.lstm_unit, num_layers=2, batch_first=False, bidirectional=False)
+            self.vel_lstm = nn.LSTM((config.hidden_per_pitch*2+self.context_dim)*88, config.lstm_unit, num_layers=2, batch_first=False, bidirectional=False)
             self.vel_output = nn.Linear(config.lstm_unit, 88)
             
 
@@ -214,17 +218,20 @@ class ARModel(nn.Module):
             if random_condition:
                 last_states = random_modification(last_states, 0.1)
 
-            context_enc = self.context_net(last_states, 
-                                           last_onset_time.unsqueeze(-1), 
-                                           last_onset_vel.unsqueeze(-1)) # B x T x out_dim x 88
+            if self.enhanced_context:
+                context_enc = self.context_net(last_states, 
+                                            last_onset_time.unsqueeze(-1), 
+                                            last_onset_vel.unsqueeze(-1)) # B x T x out_dim x 88
+            else:
+                context_enc = self.context_net(last_states).transpose(2,3) # B x T x 88 x 2
 
             # print(f'context:{context_enc.shape}')
             if self.pitchwise:
                 concat = th.cat((context_enc, conv_out), dim=2).\
-                    permute(1, 0, 3, 2).reshape(n_frame, batch_size*88, self.hidden_per_pitch+4)
+                    permute(1, 0, 3, 2).reshape(n_frame, batch_size*88, self.hidden_per_pitch+self.context_dim)
             else:
                 concat = th.cat((context_enc, conv_out), dim=2).\
-                    permute(1, 0, 3, 2).reshape(n_frame, batch_size, (self.hidden_per_pitch+4)*88)
+                    permute(1, 0, 3, 2).reshape(n_frame, batch_size, (self.hidden_per_pitch+self.context_dim)*88)
             self.lstm.flatten_parameters()
             # print(f'concat:{concat.shape}')
             lstm_out, lstm_hidden = self.lstm(concat) # hidden_per_pitch
@@ -235,10 +242,10 @@ class ARModel(nn.Module):
 
             if self.pitchwise:
                 vel_concat = th.cat((context_enc, conv_out.detach(), vel_conv_out), dim=2).\
-                    permute(1, 0, 3, 2).reshape(n_frame, batch_size*88, self.hidden_per_pitch*2+4)
+                    permute(1, 0, 3, 2).reshape(n_frame, batch_size*88, self.hidden_per_pitch*2+self.context_dim)
             else:
                 vel_concat = th.cat((context_enc, conv_out.detach(), vel_conv_out), dim=2).\
-                    permute(1, 0, 3, 2).reshape(n_frame, batch_size, (self.hidden_per_pitch*2+4)*88)
+                    permute(1, 0, 3, 2).reshape(n_frame, batch_size, (self.hidden_per_pitch*2+self.context_dim)*88)
             self.vel_lstm.flatten_parameters()
             vel_lstm_out, vel_lstm_hidden = self.vel_lstm(vel_concat) # hidden_per_pitch
             vel_out = self.vel_output(vel_lstm_out) # n_frame, B*88 x 1
@@ -268,10 +275,14 @@ class ARModel(nn.Module):
             last_onset_time = init_onset_time.to(device)
             last_onset_vel = init_onset_vel.to(device)
 
-            context_enc = self.context_net(
-                last_state.view(batch_size, 1, 88),
-                last_onset_time.view(batch_size, 1, 88, 1),
-                last_onset_vel.view(batch_size, 1, 88, 1))
+            if self.enhanced_context:
+                context_enc = self.context_net(
+                    last_state.view(batch_size, 1, 88),
+                    last_onset_time.view(batch_size, 1, 88, 1),
+                    last_onset_vel.view(batch_size, 1, 88, 1))
+            else:
+                context_enc = self.context_net(
+                    last_state.view(batch_size, 1, 88)).transpose(2,3)
             frame = th.zeros((batch_size, step_len, 88, 5)).to(device)
             vel = th.zeros((batch_size, step_len, 88)).to(device)
 
@@ -364,9 +375,9 @@ class ARModel(nn.Module):
         n_frame = 1
 
         if self.pitchwise:
-            concat = th.cat((c, z), 2).permute(1, 0, 3, 2).reshape(n_frame, batch_size*88, self.hidden_per_pitch+4)
+            concat = th.cat((c, z), 2).permute(1, 0, 3, 2).reshape(n_frame, batch_size*88, self.hidden_per_pitch+self.context_dim)
         else:
-            concat = th.cat((c, z), 2).permute(1, 0, 3, 2).reshape(n_frame, batch_size, (self.hidden_per_pitch+4)*88)
+            concat = th.cat((c, z), 2).permute(1, 0, 3, 2).reshape(n_frame, batch_size, (self.hidden_per_pitch+self.context_dim)*88)
 
         self.lstm.flatten_parameters()
         lstm_out, lstm_hidden = self.lstm(concat, h) # hidden_per_pitch
@@ -375,9 +386,9 @@ class ARModel(nn.Module):
 
         vel_concat = th.cat((c, z, vel_z), dim=2).permute(1, 0, 3, 2)
         if self.pitchwise:
-            vel_concat = vel_concat.reshape(n_frame, batch_size*88, self.hidden_per_pitch*2+4)
+            vel_concat = vel_concat.reshape(n_frame, batch_size*88, self.hidden_per_pitch*2+self.context_dim)
         else:
-            vel_concat = vel_concat.reshape(n_frame, batch_size, (self.hidden_per_pitch*2+4)*88)
+            vel_concat = vel_concat.reshape(n_frame, batch_size, (self.hidden_per_pitch*2+self.context_dim)*88)
         self.vel_lstm.flatten_parameters()
         vel_lstm_out, vel_lstm_hidden = self.vel_lstm(vel_concat, vel_h) # hidden_per_pitch
         vel_out = self.vel_output(vel_lstm_out) # n_frame, B*88 x 1
@@ -470,10 +481,12 @@ class FilmLayer(nn.Module):
 
 
 class FilmBlock(nn.Module):
-    def __init__(self, n_input, n_unit, n_f, hidden=16, use_film=True):
+    def __init__(self, n_input, n_unit, n_f, hidden=16, use_film=True, width_l1=3, width_l2=3):
         super().__init__()
-        self.conv1 = nn.Conv2d(n_input, n_unit, (3, 3), padding=1)
-        self.conv2 = nn.Conv2d(n_unit, n_unit, (3, 3), padding=1)
+        assert(width_l1 in [1,3])
+        assert(width_l2 in [1,3])
+        self.conv1 = nn.Conv2d(n_input, n_unit, (3, width_l1), padding=(1,width_l1//3))
+        self.conv2 = nn.Conv2d(n_unit, n_unit, (3, width_l2), padding=(1,width_l2//3))
         self.bn = nn.BatchNorm2d(n_unit)
         self.use_film = use_film
         if use_film:
@@ -645,7 +658,8 @@ class PAR(nn.Module):
     
 class PAR_v2(nn.Module):
     # SimpleConv without Pitchwise Conv
-    def __init__(self, n_mels, cnn_unit, fc_unit, win_fw, win_bw, hidden_per_pitch, use_film):
+    def __init__(self, n_mels, cnn_unit, fc_unit, win_fw, win_bw, hidden_per_pitch, use_film,
+                 cnn_widths = [3,3,3,3,3,3], multifc=True):
         super().__init__()
 
         self.win_fw = win_fw
@@ -653,12 +667,12 @@ class PAR_v2(nn.Module):
         self.hidden_per_pitch = hidden_per_pitch
         # input is batch_size * 1 channel * frames * 700
         self.cnn = nn.Sequential(
-            FilmBlock(1, cnn_unit, n_mels, use_film=use_film),
+            FilmBlock(1, cnn_unit, n_mels, use_film=use_film, width_l1=cnn_widths[0], width_l2=cnn_widths[1]),
             nn.MaxPool2d((2, 1)),
             nn.Dropout(0.25),
-            FilmBlock(cnn_unit, cnn_unit, n_mels//2, use_film=use_film),
+            FilmBlock(cnn_unit, cnn_unit, n_mels//2, use_film=use_film, width_l1=cnn_widths[2], width_l2=cnn_widths[3]),
             nn.MaxPool2d((2, 1)),
-            FilmBlock(cnn_unit, cnn_unit, n_mels//4, use_film=use_film),
+            FilmBlock(cnn_unit, cnn_unit, n_mels//4, use_film=use_film, width_l1=cnn_widths[4], width_l2=cnn_widths[5]),
             nn.Dropout(0.25),
         )
 
@@ -669,7 +683,9 @@ class PAR_v2(nn.Module):
         )
 
         # self.win_fc = nn.Linear(fc_unit*(win_fw+win_bw+1), hidden_per_pitch//2*88)
-        self.win_fc = nn.Conv1d(fc_unit, fc_unit, self.win_fw+self.win_bw+1)
+        self.multifc=multifc
+        if multifc:
+            self.win_fc = nn.Conv1d(fc_unit, fc_unit, self.win_fw+self.win_bw+1)
         self.pitch_linear = nn.Linear(fc_unit, self.hidden_per_pitch*88)
         self.layernorm = nn.LayerNorm([hidden_per_pitch, 88])
 
@@ -679,9 +695,10 @@ class PAR_v2(nn.Module):
         x = x.transpose(2,3)  # B 1 F L
         x = self.cnn(x)  # B C F L
         fc_x = self.fc(x.permute(0, 3, 1, 2).flatten(-2)) # B L C
-        fc_x = F.pad(fc_x.permute(0,2,1), (self.win_bw, self.win_fw)) # B C L 
-        multistep_x = self.win_fc(fc_x)
-        pitchwise_x = self.pitch_linear(multistep_x.transpose(1,2))
+        if self.multifc:
+            fc_x = F.pad(fc_x.permute(0,2,1), (self.win_bw, self.win_fw)) # B C L 
+            fc_x = self.win_fc(fc_x).transpose(1,2)
+        pitchwise_x = self.pitch_linear(fc_x)
         pitchwise_x = pitchwise_x.view(batch_size, -1, self.hidden_per_pitch, 88)
         return F.relu(self.layernorm(pitchwise_x))
 

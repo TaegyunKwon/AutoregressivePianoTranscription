@@ -1,0 +1,10 @@
+{
+    "model": "PAR_v2",
+    "noisy_condition": false,
+    "pitchwise_lstm": true,
+    "film": true,
+    "enhanced_context": false,
+    "multifc": false,
+    "cnn_widths": [3,1,3,1,1,1]
+
+}

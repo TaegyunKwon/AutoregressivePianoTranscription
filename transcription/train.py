@@ -67,6 +67,9 @@ default_config = dict(
     noisy_condition=True,
     valid_interval=10000,
     valid_seq_len=716800,
+    enhanced_context=True,
+    multifc=True,
+    cnn_widths = [3,3,3,3,3,3],
     debug=False,
     seed=1000,
     resume_dir=None,
@@ -368,6 +371,7 @@ def train(rank, world_size, config, ddp=True):
             num_workers=config.n_workers,
             pin_memory=False,
             drop_last=True,
+            persistent_workers=True,
         )
 
         loss_fn = Losses()
