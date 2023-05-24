@@ -240,7 +240,7 @@ def valid_step(model, batch, loss_fn, device, config):
     validation_metric = defaultdict(list)
     for n in range(audio.shape[0]):
         sample = frame_out[n].argmax(dim=-1)
-        metrics = evaluate(sample, shifted_label[n][1:], vel_out[n], shifted_vel[n][1:], band_eval=True)
+        metrics = evaluate(sample, shifted_label[n][1:], vel_out[n], shifted_vel[n][1:], band_eval=False)
         for k, v in metrics.items():
             validation_metric[k].append(v)
     validation_metric['frame_loss'] = loss.mean(dim=(1,2))
@@ -337,8 +337,8 @@ def train(rank, world_size, config, ddp=True):
             dist.barrier()
         
     if not config.eval:
-        if rank == 0:
-            run.watch(model, log_freq=1000)
+        # if rank == 0:
+        #      run.watch(model, log_freq=1000)
 
         scheduler = StepLR(optimizer, step_size=5000, gamma=0.95)
         train_set = get_dataset(config, ['train'], sample_len=config.seq_len, 
