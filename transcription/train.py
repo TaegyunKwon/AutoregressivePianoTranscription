@@ -312,7 +312,7 @@ def train(rank, world_size, config, ddp=True):
         step = 0
     if rank == 0:
         if config.resume_dir:
-            run = wandb.init('transcription', id=config.id, resume="must", dir=config.logdir)
+            run = wandb.init('transcription', id=config.id, dir=config.logdir)
         else:   
             run = wandb.init('transcription', config=config, id=config.id, name=config.name, dir=config.logdir)
         summary(model)
@@ -459,7 +459,7 @@ def train(rank, world_size, config, ddp=True):
     test_set = get_dataset(config, ['test'], sample_len=None,
                             random_sample=False, transform=False)
     test_set.sort_by_length()
-    batch_size = 4 # 6 for PAR model, 12G RAM (8 blocked by 8G shm size)
+    batch_size = 2 # 6 for PAR model, 12G RAM (8 blocked by 8G shm size)
     if ddp:
         segments = np.split(np.arange(len(test_set)),
                             np.arange(len(test_set), step=batch_size))[1:]  # the first segment is []
