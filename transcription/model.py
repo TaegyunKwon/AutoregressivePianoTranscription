@@ -903,6 +903,7 @@ class PC_v9(nn.Module):
         self.win_fw = win_fw
         self.win_bw = win_bw
         self.hidden_per_pitch = hidden_per_pitch
+        self.multifc = multifc
         # input is batch_size * 1 channel * frames * 700
         self.cnn = nn.Sequential(
             FilmBlock(1, cnn_unit, n_mels, use_film=use_film, width_l1=cnn_widths[0], width_l2=cnn_widths[1]),
