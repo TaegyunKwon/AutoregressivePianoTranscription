@@ -918,6 +918,7 @@ class PC_v9(nn.Module):
 
         self.shrink = nn.Sequential(
             nn.Conv2d(cnn_unit, 4, (1, 1)),
+            nn.BatchNorm2d(4),
             nn.ReLU(),
             nn.Conv2d(4, 1, (1, 1)),
             nn.ReLU()
@@ -925,12 +926,21 @@ class PC_v9(nn.Module):
 
         self.fc = nn.Sequential(
             nn.Conv1d((n_mels // 4), self.hidden_per_pitch*88, 1),
+            nn.BatchNorm1d(self.hidden_per_pitch*88),
             nn.Dropout(0.25),
             nn.ReLU()
         )
 
-        self.fc_1 = nn.Conv1d(hidden_per_pitch*88, hidden_per_pitch*88, 1, padding=0, groups=88)
-        self.fc_2 = nn.Conv1d(hidden_per_pitch*88, hidden_per_pitch*88, 1, padding=0, groups=88)
+        self.fc_1 = nn.Sequential(
+            nn.Conv1d(hidden_per_pitch*88, hidden_per_pitch*88, 1, padding=0, groups=88),
+            nn.BatchNorm1d(self.hidden_per_pitch*88),
+            nn.ReLU()
+        ) 
+        self.fc_2 = nn.Sequential(
+            nn.Conv1d(hidden_per_pitch*88, hidden_per_pitch*88, 1, padding=0, groups=88),
+            nn.BatchNorm1d(self.hidden_per_pitch*88),
+            nn.ReLU()
+        ) 
         # self.win_fc = nn.Linear(fc_unit*(win_fw+win_bw+1), hidden_per_pitch//2*88)
         if multifc:
             self.win_fc = nn.Conv2d(self.hidden_per_pitch, self.hidden_per_pitch, (1, self.win_fw+self.win_bw+1))
