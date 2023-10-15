@@ -8,7 +8,7 @@ from torchaudio import transforms
 from .constants import SR, HOP
 from .context import random_modification, update_context
 from .cqt import MultiCQT
-from .midispectrogram import CombinedSpec
+from .midispectrogram import CombinedSpec, MidiSpec
 
 class ARModel(nn.Module):
     def __init__(self, config, perceptual_w=False):
@@ -24,6 +24,8 @@ class ARModel(nn.Module):
             self.frontend = MultiCQT()
         elif 'Mel2' in self.model:
             self.frontend = CombinedSpec()
+        elif 'MIDI' in self.model:
+            self.frontend = MIDIFrontEnd()
         else:
             self.frontend = transforms.MelSpectrogram(sample_rate=SR, n_fft=config.n_fft,
                 hop_length=HOP, f_min=config.f_min, f_max=config.f_max, n_mels=config.n_mels, normalized=False)
@@ -49,6 +51,13 @@ class ARModel(nn.Module):
             self.vel_acoustic = PAR_v2_bn(config.n_mels, config.cnn_unit, config.fc_unit, 
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
                                 use_film=config.film)
+        elif self.model == 'PAR_v2_MIDI':
+            self.acoustic = PAR_v2_midi(config.n_mels, config.cnn_unit, config.fc_unit, 
+                                config.win_fw, config.win_bw, config.hidden_per_pitch,
+                                use_film=config.film, cnn_widths=config.cnn_widths, multifc=config.multifc)
+            self.vel_acoustic = PAR_v2_midi(config.n_mels, config.cnn_unit, config.fc_unit, 
+                                config.win_fw, config.win_bw, config.hidden_per_pitch,
+                                use_film=config.film, cnn_widths=config.cnn_widths, multifc=config.multifc)
         elif self.model == 'PC_v8':
             self.acoustic = PC_v8(config.n_mels, config.cnn_unit, config.fc_unit, 
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
@@ -290,15 +299,18 @@ class ARModel(nn.Module):
             h, vel_h = None, None
             offset = 0
 
+            print(f'n_segs:{n_segs}, n_step:{step_len}')
+            seg_num = 0
             for step in range(step_len):
                 if step in seg_edges:
+                    print(f'segment: {seg_num}')
+                    seg_num += 1
                     offset = step
                     if step == 0:  # First segment
                         unpad_start = False
                         start = 0
                     else:
-                        del conv_out
-                        del vel_conv_out
+                        del conv_out, vel_conv_out
                         unpad_start = True
                         start = offset * HOP - self.n_fft//2 
 
@@ -359,7 +371,16 @@ class ARModel(nn.Module):
                 spec = spec[:,:-self.n_fft//2//HOP]
             conv_out, fc_feature = self.acoustic(mel_low, mel_high, spec)  # B x T x hidden_per_pitch x 88
             vel_conv_out, vel_fc_feature = self.vel_acoustic(mel_low, mel_high, spec) # B x T x hidden_per_pitch x 88
-            return conv_out, vel_conv_out, fc_feature, vel_fc_feature 
+            return conv_out, vel_conv_out, fc_feature, vel_fc_feature
+        elif 'MIDI' in self.model:
+            spec = self.frontend(audio)
+            if unpad_start:
+                spec = spec[:,:,:,self.n_fft//2//HOP:]
+            if unpad_end:
+                spec = spec[:,:,:,:-self.n_fft//2//HOP]
+            conv_out = self.acoustic(spec)  # B x T x hidden_per_pitch x 88
+            vel_conv_out = self.vel_acoustic(spec)
+            return conv_out, vel_conv_out
         else:
             mel = self.frontend(
                 audio[:, :-1]).transpose(-1, -2) # B L F
@@ -489,8 +510,8 @@ class FilmBlock(nn.Module):
         super().__init__()
         assert(width_l1 in [1,3])
         assert(width_l2 in [1,3])
-        self.conv1 = nn.Conv2d(n_input, n_unit, (3, width_l1), padding=(1,width_l1//3))
-        self.conv2 = nn.Conv2d(n_unit, n_unit, (3, width_l2), padding=(1,width_l2//3))
+        self.conv1 = nn.Conv2d(n_input, n_unit, (3, width_l1), padding='same')
+        self.conv2 = nn.Conv2d(n_unit, n_unit, (3, width_l2), padding='same')
         self.bn = nn.BatchNorm2d(n_unit)
         self.use_film = use_film
         if use_film:
@@ -705,6 +726,170 @@ class PAR_v2(nn.Module):
         pitchwise_x = self.pitch_linear(fc_x)
         pitchwise_x = pitchwise_x.view(batch_size, -1, self.hidden_per_pitch, 88)
         return F.relu(self.layernorm(pitchwise_x))
+
+class MIDIFrontEnd(nn.Module):
+    def __init__(self, n_per_pitch=3, detune=0.0) -> None:
+        # Detune: semitone unit. 0.5 means 50 cents.
+        super().__init__()
+        self.midi_low = MidiSpec(1024, n_per_pitch)
+        self.midi_mid = MidiSpec(4096, n_per_pitch)
+        self.midi_high = MidiSpec(8192, n_per_pitch)
+
+    def forward(self, audio, detune_list=None):
+        midi_low = self.midi_low(audio, detune_list)
+        midi_mid = self.midi_mid(audio, detune_list)
+        midi_high = self.midi_high(audio, detune_list)
+        spec = th.stack([midi_low, midi_mid, midi_high], dim=1)
+        return spec # B, 3, F, T
+
+class HarmonicCNN(nn.Module):
+    def __init__(self, cnn_unit):
+        super().__init__()
+
+        self.conv  = nn.Sequential(
+            nn.Conv2d(cnn_unit, cnn_unit, (3, 3), stride=(3,1), padding=(0, 1)),
+            nn.ReLU()
+        )
+
+        map_idx = [-36, -31, -28, -24, -19, -12, 0, 12, 19, 24, 28, 31, 36]
+        select_idx = []
+        for n in range(88):
+            select_idx.extend([n+36+el for el in map_idx])
+        select_idx = th.Tensor(select_idx).to(int)
+        self.register_buffer('select_idx', select_idx)
+            
+        self.shared = nn.Sequential(
+            nn.Conv2d(cnn_unit, cnn_unit, (13, 1)),
+            nn.ReLU(),
+            nn.Conv2d(cnn_unit, cnn_unit, (1, 1)),
+            nn.ReLU())
+            
+        self.nonshared = nn.Sequential(
+            nn.Conv2d(88*cnn_unit, 88*cnn_unit, (13, 1), groups=88),
+            nn.ReLU(),
+            nn.Conv2d(88*cnn_unit, 88*cnn_unit, (1, 1), groups=88),
+            nn.ReLU())
+
+    def forward(self, cnn_out):
+        batch_size = cnn_out.shape[0]
+        seq_len = cnn_out.shape[-1]
+        cnn_unit = cnn_out.shape[1]
+
+        cnn_out_semitone = self.conv(cnn_out) # B, C, 88, T
+        x_pad = F.pad(cnn_out_semitone, (0,0,36,36))
+        x_split = th.index_select(x_pad, 2, self.select_idx)  # B, C, 88*13, T
+        x_split = x_split.reshape(batch_size, x_split.shape[1], 88, 13, seq_len) # B, C, 88, 13, T
+        x_split = x_split.permute(0,2,1,3,4)  # B, 88, C, 13, T
+    
+        x_shared = self.shared(x_split.reshape(batch_size*88, cnn_unit, 13, seq_len)) # B*88, C, 1, T
+        x_nonshared = self.nonshared(x_split.reshape(batch_size, 88*cnn_unit, 13, seq_len)) # B, 88*C, 1, T
+        ac_out = th.concat(
+            (x_shared.reshape(batch_size, 88, cnn_unit, -1), 
+             x_nonshared.reshape(batch_size, 88, cnn_unit, seq_len)), dim=2) # B, 88, 2C, T
+        ac_out = ac_out.permute(0, 1, 3, 2)
+        return ac_out.reshape(batch_size*88, seq_len, 2*cnn_unit)  # B*88, T, 2C
+        
+
+class PAR_v2_midi(nn.Module):
+    # SimpleConv without Pitchwise Conv
+    def __init__(self, n_mels, cnn_unit, fc_unit, win_fw, win_bw, hidden_per_pitch, use_film,
+                 cnn_widths = [3,3,3,3,3,3], multifc=True):
+        super().__init__()
+
+        self.win_fw = win_fw
+        self.win_bw = win_bw
+        self.hidden_per_pitch = hidden_per_pitch
+        # input is batch_size * 1 channel * frames * 700
+        self.cnn = nn.Sequential(
+            FilmBlock(3, cnn_unit, n_mels, use_film=use_film, width_l1=cnn_widths[0], width_l2=cnn_widths[1]),
+            # nn.MaxPool2d((2, 1)),
+            nn.Dropout(0.25),
+            FilmBlock(cnn_unit, cnn_unit, n_mels, use_film=use_film, width_l1=cnn_widths[2], width_l2=cnn_widths[3]),
+            # nn.MaxPool2d((2, 1)),
+            FilmBlock(cnn_unit, cnn_unit, n_mels, use_film=use_film, width_l1=cnn_widths[4], width_l2=cnn_widths[5]),
+            nn.Dropout(0.25),
+        )
+        # self.mapping = HarmonicCNN(cnn_unit)
+
+        self.fc = nn.Sequential(
+            nn.Linear((cnn_unit) * (n_mels), fc_unit),
+            nn.Dropout(0.25),
+            nn.ReLU()
+        )
+
+        # self.pitch_linear = nn.Linear(2*cnn_unit, self.hidden_per_pitch)
+        self.pitch_linear = nn.Linear(fc_unit, self.hidden_per_pitch*88)
+        self.layernorm = nn.LayerNorm([hidden_per_pitch, 88])
+
+    def forward(self, mel):
+        batch_size = mel.shape[0]
+        x = self.cnn(mel)  # B C F L
+        # x = self.mapping(x)  # B*88 T 2C
+        fc_x = self.fc(x.permute(0, 3, 1, 2).flatten(-2)) # B L C
+        pitchwise_x = self.pitch_linear(fc_x)
+        pitchwise_x = pitchwise_x.view(batch_size, -1, self.hidden_per_pitch, 88)
+        # pitchwise_x = pitchwise_x.view(batch_size, 88, -1, self.hidden_per_pitch)
+        # pitchwise_x = pitchwise_x.permute(0, 2, 3, 1) # B T H 88
+        return F.relu(self.layernorm(pitchwise_x))
+
+class PAR_v4_midi(nn.Module):
+    # SimpleConv without Pitchwise Conv
+    def __init__(self, n_mels, cnn_unit, fc_unit, win_fw, win_bw, hidden_per_pitch, use_film,
+                 cnn_widths = [3,3,3,3,3,3], multifc=True):
+        super().__init__()
+
+        self.win_fw = win_fw
+        self.win_bw = win_bw
+        self.hidden_per_pitch = hidden_per_pitch
+        # input is batch_size * 1 channel * frames * 700
+        self.cnn = nn.Sequential(
+            FilmBlock(3, cnn_unit, n_mels, use_film=use_film, width_l1=cnn_widths[0], width_l2=cnn_widths[1]),
+            nn.Dropout(0.25),
+            FilmBlock(cnn_unit, cnn_unit, n_mels, use_film=use_film, width_l1=cnn_widths[2], width_l2=cnn_widths[3]),
+            nn.Dropout(0.25),
+            FilmBlock(cnn_unit, cnn_unit, n_mels, use_film=use_film, width_l1=cnn_widths[4], width_l2=cnn_widths[5]),
+            nn.Dropout(0.25),
+        )
+        
+        map_idx = [-36, -31, -28, -24, -19, -12, 0, 12, 19, 24, 28, 31, 36]
+        self.select_idx = []
+        for n in range(88):
+            self.select_idx.extend([n+36+el for el in map_idx])
+
+
+        self.shared = nn.Sequential(
+            nn.Conv2d(cnn_unit, cnn_unit, (13, 1)),
+            nn.ReLU(),
+            nn.Conv2d(cnn_unit, cnn_unit, (1, 1)),
+            nn.ReLU())
+
+        self.nonshared = nn.Sequential(
+            nn.Conv2d(88*cnn_unit, 88*cnn_unit, (13, 1), groups=88),
+            nn.ReLU(),
+            nn.Conv2d(88*cnn_unit, 88*cnn_unit, (1, 1), groups=88),
+            nn.ReLU())
+
+        # self.win_fc = nn.Linear(fc_unit*(win_fw+win_bw+1), hidden_per_pitch//2*88)
+        self.multifc = multifc
+        if multifc:
+            self.win_fc = nn.Conv1d(fc_unit, fc_unit, self.win_fw+self.win_bw+1)
+        # self.pitch_linear = nn.Linear(fc_unit, self.hidden_per_pitch*88)
+        self.pitch_linear = nn.Linear(fc_unit, self.hidden_per_pitch*88)
+        self.layernorm = nn.LayerNorm([hidden_per_pitch, 88])
+
+    def forward(self, multi_mel):
+        batch_size = multi_mel.shape[0]
+        x = multi_mel  # B 3 L F
+        x = x.transpose(2,3)  # B 1 F L
+        x = self.cnn(x)  # B C F L
+        fc_x = self.fc(x.permute(0, 3, 1, 2).flatten(-2)) # B L C
+        if self.multifc:
+            fc_x = F.pad(fc_x.permute(0,2,1), (self.win_bw, self.win_fw)) # B C L 
+            fc_x = self.win_fc(fc_x).transpose(1,2)
+        pitchwise_x = self.pitch_linear(fc_x)
+        pitchwise_x = pitchwise_x.view(batch_size, -1, self.hidden_per_pitch, 88)
+        return F.relu(self.layernorm(pitchwise_x))
+
 
 class PAR_v2_bn(nn.Module):
     # SimpleConv without Pitchwise Conv

@@ -337,8 +337,8 @@ def train(rank, world_size, config, ddp=True):
             dist.barrier()
         
     if not config.eval:
-        # if rank == 0:
-        #      run.watch(model, log_freq=1000)
+        if rank == 0:
+            run.watch(model, log_freq=1000)
 
         scheduler = StepLR(optimizer, step_size=5000, gamma=0.95)
         train_set = get_dataset(config, ['train'], sample_len=config.seq_len, 

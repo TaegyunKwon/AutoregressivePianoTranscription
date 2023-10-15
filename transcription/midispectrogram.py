@@ -3,11 +3,54 @@ import warnings
 from typing import Callable, Optional
 
 import torch
+import torch as th
+from torch import nn
 from torch import Tensor
 from torchaudio import functional as F
 from torchaudio import transforms
 import librosa
+from .constants import HOP, SR
 
+
+
+class MidiSpec(nn.Module):
+    def __init__(self, n_fft, n_per_pitch=3) -> None:
+        super().__init__()
+        self.spec_op = transforms.Spectrogram(
+            n_fft=n_fft,
+            hop_length=HOP,
+            )
+            
+        self.n_per_pitch = n_per_pitch
+        self.all_freqs = th.linspace(0, SR // 2, n_fft//2+1)
+        n_width = 1 / n_per_pitch
+        midi_range = th.arange(n_per_pitch * (120-21)+2) / n_per_pitch + 21 - 2*n_width
+        
+        midi_freqs = 2 ** ((midi_range - 69) / 12) * 440 # 119: 7902 Hz
+        n_freq = n_per_pitch * (120-21)
+        fb = _create_triangular_filterbank(self.all_freqs, f_pts=midi_freqs)
+        enorm = 2.0 / (midi_freqs[2 : n_freq + 2] - midi_freqs[:n_freq])
+        fb *= enorm.unsqueeze(0)
+        self.register_buffer("fb", fb)
+
+    def forward(self, audio, detune_list=None):
+        specgram = self.spec_op(audio)
+        if detune_list is None:
+            midi_specgram = th.matmul(specgram.transpose(-1, -2), self.fb).transpose(-1, -2)
+        else:
+            midi_range = th.arange(self.n_per_pitch * (120-21)+2) / self.n_per_pitch + 21 - 2/self.n_per_pitch
+            midi_specgram = []
+            for n, detune in enumerate(detune_list):
+                midi_freqs = 2 ** ((midi_range - 69 + detune) / 12) * 440 # 119: 7902 Hz
+                n_freq = self.n_per_pitch * (120-21)
+                fb = _create_triangular_filterbank(self.all_freqs, f_pts=midi_freqs)
+                enorm = 2.0 / (midi_freqs[2 : n_freq + 2] - midi_freqs[:n_freq])
+                fb *= enorm.unsqueeze(0)
+                midi_specgram.append(th.matmul(specgram[n].transpose(-1, -2), fb).transpose(-1, -2))
+            midi_specgram = th.stack(midi_specgram)
+
+        log_midi = th.log(th.clamp(midi_specgram, min=1e-7))[:,:,:-1] # get rid of the last bin
+        return log_midi  # N, F, T
 
 class MIDISpectrogram(torch.nn.Module):
     __constants__ = ["sample_rate", "n_fft", "win_length", "hop_length", "pad", "n_mels_per_semitone"]

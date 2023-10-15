@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 import subprocess
+import argparse
 
 import torch as th
 import torch.nn.functional as F
@@ -12,10 +13,13 @@ import numpy as np
 
 import soundfile
 from tqdm import tqdm
+from mir_eval.util import hz_to_midi, midi_to_hz
 
-from transcription.constants import HOP
+from transcription.constants import HOP, SR, MIN_MIDI
 from transcription.model import ARModel
 from transcription.train import get_dataset, PadCollate
+from transcription.decode import extract_notes, notes_to_frames
+from transcription.midi import save_midi
 
 
 def load_audio(audiofile):
@@ -37,21 +41,27 @@ def load_audio(audiofile):
             audio, sr = soundfile.read(temp_flac)
     return audio
 
-def transcribe(model, audio_batch, step_len=None):
-    device = model.device()
+def transcribe(model, audio_batch, save_name, step_len=None, device='cuda'):
+    print('Transcription Start')
     if step_len is None:
         step_len = [None]*audio_batch.shape[0]
-    t_audio = audio_batch.float().div_(32768.0)
+    t_audio = audio_batch.float()
     pad_len = math.ceil(len(t_audio) / HOP) * HOP - len(t_audio)
     t_audio = F.pad(t_audio, (0, pad_len)).to(device)
-    frame_out, vel_out = model(t_audio, last_states=None, random_condition=False, sampling='argmax')
+    with th.no_grad():
+        frame_out, vel_out = model(t_audio, last_states=None, random_condition=False, 
+                                sampling='argmax', max_step=1000)
+    out = th.argmax(frame_out[0], dim=-1)
+    onset_est = ((out == 2) + (out == 4))
+    frame_est = ((out == 2) + (out == 3) + (out == 4))
+    vel_est = th.clamp(vel_out[0]*128, min=0, max=128)
+    p_est, i_est, v_est = extract_notes(onset_est, frame_est, vel_est)
+    scaling = HOP / SR
+    i_est = (i_est * scaling).reshape(-1, 2)
 
-    outs = []
-    vel_outs = []
-    for n in range(len(t_audio.shape[0])): # batch size
-        outs.append(frame_out[n,:step_len[n]])
-        vel_outs.append(vel_out[n,:step_len[n]])
-    return outs, vel_outs
+    save_midi(Path(save_name).with_suffix('.mid'), p_est+21, i_est, v_est)
+
+    return frame_out, vel_out
 
 def load_model(model_path, device):
     ckp = th.load(model_path, map_location='cpu')
@@ -105,5 +115,14 @@ def transcribe_with_lstm_out(model, config, save_folder, device='cuda'):
         activation = [] 
         
 if __name__ == '__main__':
-    model, config = load_model('runs/PAR_v2_230420-183632_PAR_v2_cp19/model_250k_0.8988.pt', 'cuda')
-    transcribe_with_lstm_out(model, config, save_folder='lstm_out/h')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model_path', type=str, default='runs/PAR_v2_230524-181231_PAR_v2_new2_herby/model_200k_0.9019.pt')
+    parser.add_argument('--audio_path', type=str, required=True)
+    args = parser.parse_args()
+
+    model, config = load_model(args.model_path, 'cuda')
+    print(f'load model:{args.model_path}')
+
+    audio = load_audio(args.audio_path)
+    audio_tensor = th.from_numpy(audio).unsqueeze(0)
+    out, vel_out = transcribe(model, audio_tensor, 'transcribed/' + Path(args.audio_path).stem, device='cuda')
