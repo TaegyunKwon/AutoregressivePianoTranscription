@@ -7,7 +7,7 @@ from torchaudio import transforms
 # from .cqt import CQT
 from .constants import SR, HOP
 from .context import random_modification, update_context
-from .cqt import MultiCQT
+# from .cqt import MultiCQT
 from .midispectrogram import CombinedSpec, MidiSpec
 
 class ARModel(nn.Module):
@@ -25,7 +25,7 @@ class ARModel(nn.Module):
         elif 'Mel2' in self.model:
             self.frontend = CombinedSpec()
         elif 'MIDI' in self.model:
-            self.frontend = MIDIFrontEnd()
+            self.frontend = MIDIFrontEnd(n_per_pitch=5)
         else:
             self.frontend = transforms.MelSpectrogram(sample_rate=SR, n_fft=config.n_fft,
                 hop_length=HOP, f_min=config.f_min, f_max=config.f_max, n_mels=config.n_mels, normalized=False)
@@ -747,7 +747,7 @@ class HarmonicCNN(nn.Module):
         super().__init__()
 
         self.conv  = nn.Sequential(
-            nn.Conv2d(cnn_unit, cnn_unit, (3, 3), stride=(3,1), padding=(0, 1)),
+            nn.Conv2d(cnn_unit, cnn_unit, (5, 3), stride=(5,1), padding=(0, 1)),
             nn.ReLU()
         )
 
@@ -809,27 +809,32 @@ class PAR_v2_midi(nn.Module):
             FilmBlock(cnn_unit, cnn_unit, n_mels, use_film=use_film, width_l1=cnn_widths[4], width_l2=cnn_widths[5]),
             nn.Dropout(0.25),
         )
-        # self.mapping = HarmonicCNN(cnn_unit)
+        self.mapping = HarmonicCNN(cnn_unit)  # B*88, T, 2C
 
+        '''
         self.fc = nn.Sequential(
             nn.Linear((cnn_unit) * (n_mels), fc_unit),
             nn.Dropout(0.25),
             nn.ReLU()
         )
+        '''
 
-        # self.pitch_linear = nn.Linear(2*cnn_unit, self.hidden_per_pitch)
-        self.pitch_linear = nn.Linear(fc_unit, self.hidden_per_pitch*88)
+        self.pitch_linear = nn.Linear(2*cnn_unit, self.hidden_per_pitch)
+        # self.pitch_linear = nn.Linear(fc_unit, self.hidden_per_pitch*88)
         self.layernorm = nn.LayerNorm([hidden_per_pitch, 88])
 
     def forward(self, mel):
         batch_size = mel.shape[0]
         x = self.cnn(mel)  # B C F L
-        # x = self.mapping(x)  # B*88 T 2C
-        fc_x = self.fc(x.permute(0, 3, 1, 2).flatten(-2)) # B L C
-        pitchwise_x = self.pitch_linear(fc_x)
-        pitchwise_x = pitchwise_x.view(batch_size, -1, self.hidden_per_pitch, 88)
-        # pitchwise_x = pitchwise_x.view(batch_size, 88, -1, self.hidden_per_pitch)
-        # pitchwise_x = pitchwise_x.permute(0, 2, 3, 1) # B T H 88
+        x = self.mapping(x)  # B*88 T 2C
+
+        # fc_x = self.fc(x.permute(0, 3, 1, 2).flatten(-2)) # B L C
+        # pitchwise_x = self.pitch_linear(x)
+        # pitchwise_x = pitchwise_x.view(batch_size, -1, self.hidden_per_pitch, 88)
+
+        pitchwise_x = self.pitch_linear(x)
+        pitchwise_x = pitchwise_x.view(batch_size, 88, -1, self.hidden_per_pitch)
+        pitchwise_x = pitchwise_x.permute(0, 2, 3, 1) # B T H 88
         return F.relu(self.layernorm(pitchwise_x))
 
 class PAR_v4_midi(nn.Module):
