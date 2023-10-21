@@ -1,0 +1,12 @@
+{
+    "model": "PAR_v2_MIDI_HPP",
+    "n_mels": 396,
+    "hidden_per_pitch": 128,
+    "noisy_condition": false,
+    "pitchwise_lstm": true,
+    "film": true,
+    "enhanced_context": true,
+    "multifc": false,
+    "cnn_widths": [3,3,3,3,3,3]
+
+}
