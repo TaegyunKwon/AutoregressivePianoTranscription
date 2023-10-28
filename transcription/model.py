@@ -307,11 +307,11 @@ class ARModel(nn.Module):
             h, vel_h = None, None
             offset = 0
 
-            print(f'n_segs:{n_segs}, n_step:{step_len}')
+            # print(f'n_segs:{n_segs}, n_step:{step_len}')
             seg_num = 0
             for step in range(step_len):
                 if step in seg_edges:
-                    print(f'segment: {seg_num}')
+                    # print(f'segment: {seg_num}')
                     seg_num += 1
                     offset = step
                     if step == 0:  # First segment
@@ -894,6 +894,8 @@ class PAR_v2_HPP(nn.Module):
         
         self.conv_3 = HarmonicDilatedConv(cnn_unit, c3_out, n_per_pitch)
 
+        self.conv_4 = HarmonicDilatedConv(c3_out, c3_out, n_per_pitch)
+        self.conv_5 = HarmonicDilatedConv(c3_out, c3_out, n_per_pitch)
         self.block_4 = self.get_conv2d_block(c3_out, c3_out, pool_size=[1, n_per_pitch], dilation=[1, 12*n_per_pitch])
         self.block_5 = self.get_conv2d_block(c3_out, c3_out, dilation=[1, 12])
         self.block_6 = self.get_conv2d_block(c3_out, c3_out, [5,1])
@@ -905,6 +907,8 @@ class PAR_v2_HPP(nn.Module):
         x = self.block_2(x)
         x = self.block_2_5(x)
         x = self.conv_3(x)
+        x = self.conv_4(x)
+        x = self.conv_5(x)
         x = self.block_4(x)
         x = x[:,:,:,:88]
         # => [b x 1 x T x 88]

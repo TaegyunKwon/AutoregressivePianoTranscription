@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 from tqdm import tqdm
 import soundfile
+import sox
 
 from .constants import HOP, SR, MAX_MIDI, MIN_MIDI
 from .midi import parse_midi, parse_pedal
@@ -567,3 +568,73 @@ class ViennaCorpus(PianoSampleDataset):
                 pass
             result.append((audio_path, tsv_filename))
         return result
+
+        
+class UnlabledPianoDataset(Dataset):
+    def __init__(self, path, sample_len=16000*5, seed=1, 
+                 random_sample=True):
+        self.path = path
+        self.sample_len = sample_len
+        self.random_sample = random_sample
+
+        detune_file = Path(path) / 'detune.txt'
+        with open(detune_file, 'r') as f:
+            lines = f.readlines()
+       
+        self.data = [] 
+        for line in lines:
+            audio_path = line.split('\t')[0]
+            detune = line.split('\t')[1]
+            if 'nan' in detune:
+                continue
+            self.data.append((audio_path, detune))
+        if self.random_sample:
+            self.random = np.random.RandomState(seed)
+            self.data = self.random.permutation(self.data)
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, index):
+        audio_path, detune = self.data[index]
+        detune = float(detune)
+        sf = soundfile.SoundFile(audio_path)
+        length  = sf.seek(0, 2)
+        if self.random_sample:
+            start = self.random.randint(length - self.sample_len)
+        else:
+            start = 0
+        sf.seek(start)
+        audio = sf.read(self.sample_len, dtype='int16')
+
+        tfm_s = sox.Transformer()
+        # pitch_shift = {0:-2, 1:-1, 2:1, 3:2}[np.random.randint(4)]
+        pitch_shift = {0:-1, 1:1}[np.random.randint(2)]
+        tfm_s.pitch(-detune/100 + pitch_shift)
+        try:
+            audio_shift = tfm_s.build_array(input_array=audio, sample_rate_in=SR)
+        except:
+            print(audio_path, detune, pitch_shift)
+        if detune < -1 or detune > 4:
+            tfm = sox.Transformer()
+            tfm.pitch(-detune/100)
+            audio_tune = tfm.build_array(input_array=audio, sample_rate_in=SR)
+            audio = audio_tune
+        if len(audio.shape) == 2:
+            audio = np.mean(audio, axis=-1)
+            audio_shift = np.mean(audio_shift, axis=-1)
+        
+        audio = th.from_numpy(audio).float().div_(32768.0)
+        audio_shift = th.from_numpy(audio_shift).float().div_(32768.0)
+        if audio.shape[0] < self.sample_len:
+            audio = F.pad(audio, (0, self.sample_len - audio.shape[0]))
+        elif audio.shape[0] > self.sample_len:
+            audio = audio[:self.sample_len]
+        if audio_shift.shape[0] < self.sample_len:
+            audio_shift = F.pad(audio_shift, (0, self.sample_len - audio_shift.shape[0]))
+        elif audio_shift.shape[0] > self.sample_len:
+            audio_shift = audio_shift[:self.sample_len]
+            
+
+        return dict(path=audio_path, audio=audio, audio_shift=audio_shift,
+            pitch_shift=pitch_shift, detune=detune)

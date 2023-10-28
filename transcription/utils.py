@@ -2,6 +2,8 @@ import sys
 from functools import reduce
 from torch.nn.modules.module import _addindent
 from torch.utils.data.sampler import Sampler
+from matplotlib import pyplot as plt
+import torch as th
 
 def summary(model, file=sys.stdout):
     def repr(model):
@@ -60,3 +62,26 @@ class CustomSampler(Sampler):
 
     def __len__(self):
         return self.n_batch
+
+def cycle(iterable, set_epoch=False):
+    epoch = 0
+    while True:
+        if set_epoch:
+            iterable.sampler.set_epoch(epoch)
+        for item in iterable:
+            yield item
+        epoch += 1
+
+def draw_model_outs(frame_out, vel_out):
+    batch_size = frame_out.shape[0] // 2
+    fig, axes = plt.subplots(4, batch_size, figsize=(batch_size*10, 16))
+    for n in range(batch_size):
+        axes[0, n].imshow(th.argmax(frame_out[n], -1).cpu().detach().numpy().T, aspect='auto', origin='lower',
+                    vmin=0, vmax=5, interpolation='nearest')
+        axes[1, n].imshow(th.argmax(frame_out[n+batch_size], -1).cpu().detach().numpy().T, aspect='auto', origin='lower',
+                    vmin=0, vmax=5, interpolation='nearest')
+        axes[2, n].imshow(vel_out[n].cpu().detach().numpy().T, aspect='auto', origin='lower',
+                    interpolation='nearest')
+        axes[3, n].imshow(vel_out[n+batch_size].cpu().detach().numpy().T, aspect='auto', origin='lower',
+                    interpolation='nearest')
+    return fig
