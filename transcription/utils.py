@@ -81,7 +81,7 @@ def draw_model_outs(frame_out, vel_out):
         axes[1, n].imshow(th.argmax(frame_out[n+batch_size], -1).cpu().detach().numpy().T, aspect='auto', origin='lower',
                     vmin=0, vmax=5, interpolation='nearest')
         axes[2, n].imshow(vel_out[n].cpu().detach().numpy().T, aspect='auto', origin='lower',
-                    interpolation='nearest')
+                    vmin=0, vmax=1, interpolation='nearest')
         axes[3, n].imshow(vel_out[n+batch_size].cpu().detach().numpy().T, aspect='auto', origin='lower',
-                    interpolation='nearest')
+                    vmin=0, vmax=1, interpolation='nearest')
     return fig

@@ -213,11 +213,13 @@ def train_step(model, batch, loss_fn, optimizer, scheduler, device, config):
     shifted_vel = batch['velocity'].to(device)
     last_onset_time = batch['last_onset_time'].to(device)
     last_onset_vel = batch['last_onset_vel'].to(device)
+
     frame_out, vel_out = model(audio, shifted_label[:, :-1], 
                                 last_onset_time[:, :-1], last_onset_vel[:, :-1], 
                                 random_condition=config.noisy_condition)
     # frame out: B x T x 88 x 5
     loss, vel_loss = loss_fn(frame_out, vel_out, shifted_label[:, 1:], shifted_vel[:, 1:])
+
     return loss, vel_loss
     
 def valid_step(model, batch, loss_fn, device, config):
@@ -288,33 +290,30 @@ def train_step_semi(model, batch, optimizer, scheduler, device, draw=False):
     audio = batch['audio'].to(device)
     audio_shift = batch['audio_shift'].to(device)
     audio_cat = th.cat([audio, audio_shift], dim=0)
-    frame_out, vel_out = model(audio_cat, last_states=None, random_condition=False, sampling='argmax')
+    conv_out, vel_conv_out = model.local_forward(audio_cat)  # B x T x hidden x 88
+
     batch_size = audio.shape[0]
     loss = 0
     vel_loss = 0
-    arg_out = th.argmax(frame_out[:batch_size], dim=-1)
-    arg_out_shift = th.argmax(frame_out[batch_size:], dim=-1)
-    mask = (arg_out == 2) + (arg_out == 4) + (arg_out_shift == 2) + (arg_out_shift == 4)
-
+    
     for n in range(batch_size):
         shift = batch['pitch_shift'][n]
         if shift > 0:
-            mask_p = mask[n, :, :-shift]
-            loss += F.mse_loss(frame_out[n][:, :-shift]*mask_p.unsqueeze(-1), 
-                              frame_out[n+batch_size][:, shift:]*mask_p.unsqueeze(-1))
-            vel_loss += F.mse_loss(vel_out[n][:, :-shift]*mask_p, 
-                                  vel_out[n+batch_size][:, shift:]*mask_p)
+            loss += F.mse_loss(conv_out[n][:, :, :-shift],
+                              vel_conv_out[n+batch_size][:, :, shift:])
+            vel_loss += F.mse_loss(conv_out[n][:, :, :-shift], 
+                                  vel_conv_out[n+batch_size][:, :, shift:])
         else:
-            mask_p = mask[n, :, -shift:]
-            loss += F.mse_loss(frame_out[n][:, -shift:]*mask_p.unsqueeze(-1), 
-                              frame_out[n+batch_size][:, :shift]*mask_p.unsqueeze(-1))
-            vel_loss += F.mse_loss(vel_out[n][:, -shift:]*mask_p, 
-                                  vel_out[n+batch_size][:, :shift]*mask_p)
+            loss += F.mse_loss(conv_out[n][:, :, -shift:],
+                              vel_conv_out[n+batch_size][:, :, :shift])
+            vel_loss += F.mse_loss(conv_out[n][:, :, -shift:], 
+                                  vel_conv_out[n+batch_size][:, :, :shift])
     if draw:
+        frame_out, vel_out = model(audio_cat, last_states=None, random_condition=False, sampling='argmax')
         fig = draw_model_outs(frame_out, vel_out)
     else:
         fig = None
-            
+
     return loss, vel_loss, fig, audio, audio_shift
     
 
@@ -423,7 +422,7 @@ def train(rank, world_size, config, model, ddp=True):
 
         loss_fn = Losses()
 
-        if rank == 0: loop = tqdm(range(step, config.iteration), total=config.iteration, ncols=50, initial=step)
+        if rank == 0: loop = tqdm(range(step, config.iteration), total=config.iteration, initial=step)
         iterator = cycle(data_loader_train, set_epoch=ddp)
         iterator_semi = cycle(data_loader_train_semi, set_epoch=ddp)
         while True:
@@ -460,6 +459,7 @@ def train(rank, world_size, config, model, ddp=True):
                 train_log.update({"train": dict(frame_loss=loss.mean(), vel_loss=vel_loss.mean(),\
                     frame_loss_semi=semi_loss.mean(), vel_loss_semi=semi_vel_loss.mean())})
                 run.log(train_log, step=step)
+
 
             del loss, vel_loss, batch
             if step % config.valid_interval == 0 or step in [1, 100, 500, 1000, 5000]:
