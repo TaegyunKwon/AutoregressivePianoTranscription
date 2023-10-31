@@ -61,7 +61,7 @@ class PianoSampleDataset(Dataset):
         assert all(group in self.available_groups() for group in self.groups)
         self.sample_length = sample_length
         if self.sample_length is not None:
-            assert sample_length % HOP == 0
+            assert sample_length % HOP == 0, f'sample_length {sample_length} must be divisible by HOP {HOP}'
         self.delay = delay
         self.random = np.random.RandomState(seed)
         self.transform = transform
@@ -108,7 +108,8 @@ class PianoSampleDataset(Dataset):
             return tensor
             
     
-        meta = th.load(audio_path.replace('.flac', '_meta.pt'))
+        meta = th.load(audio_path.replace('.flac', f'_meta_{HOP}.pt'))
+        # meta = th.load(audio_path.replace('.flac', f'_meta.pt'))
         total_audio_length, total_steps = meta['audio_length'], meta['n_steps']
 
         if self.sample_length is not None:  # fixed length segmentation
@@ -142,12 +143,12 @@ class PianoSampleDataset(Dataset):
                     save_dtype = np.uint8
                 if step_begin > self.delay - 1:
                     result[el] = th_load_from_memmap(
-                        audio_path.replace('.flac', '_{}.npy'.format(el)), save_dtype,
+                        audio_path.replace('.flac', f'_{el}_{HOP}.npy'), save_dtype,
                         (step_begin-self.delay)*n_feature*np.dtype(save_dtype).itemsize, (n_steps+1, n_feature), cast_type)
                 else:  # if no previous frames exist
                     result[el] = F.pad(
                         th_load_from_memmap(
-                            audio_path.replace('.flac', '_{}.npy'.format(el)), save_dtype,
+                            audio_path.replace('.flac', f'_{el}_{HOP}.npy'), save_dtype,
                             step_begin*n_feature*np.dtype(save_dtype).itemsize, (n_steps, n_feature), cast_type),
                        (0,0,self.delay,0))
             result['time'] = begin / SR 
@@ -173,7 +174,7 @@ class PianoSampleDataset(Dataset):
                     save_dtype = np.uint8
                 result[el] = F.pad(
                     th_load_from_memmap(
-                        audio_path.replace('.flac', '_{}.npy'.format(el)), save_dtype, 0,
+                        audio_path.replace('.flac', f'_{el}_{HOP}.npy'), save_dtype, 0,
                         (total_steps, n_feature), cast_type),
                 (0,0,self.delay,0))
 
@@ -204,7 +205,7 @@ class PianoSampleDataset(Dataset):
         step_lens = []
         for n in range(len(self)):
             audio_path = self.data_path[n][0]
-            meta_path = audio_path.replace('.flac', '_meta.pt')
+            meta_path = audio_path.replace('.flac', f'_meta_{HOP}.pt')
             step_len = th.load(meta_path)['n_steps']
             step_lens.append(step_len)
         self.data_path = [x for _, x in sorted(zip(step_lens, self.data_path),
@@ -241,7 +242,8 @@ class PianoSampleDataset(Dataset):
         # saved_data_path = audio_path.replace('.flac', '_parsed.pt').replace('.wav', '_parsed.pt')
         # if Path(saved_data_path).exists():
         #     return 
-        meta_path = audio_path.replace('.flac', '_meta.pt')
+        meta_path = audio_path.replace('.flac', f'_meta_{HOP}.pt')
+        # meta_path = audio_path.replace('.flac', f'_meta.pt')
         if Path(meta_path).exists():
             return 
 
@@ -330,7 +332,7 @@ class PianoSampleDataset(Dataset):
             pedal_label[onset_right:frame_right, type_idx] = 3
             pedal_label[frame_right:offset_right, type_idx] = 1
 
-        meta_path = audio_path.replace('.flac', '_meta.pt')
+        meta_path = audio_path.replace('.flac', f'_meta_{HOP}.pt')
         meta = dict(audio_length=audio_length, n_steps=n_steps)
         th.save(meta, meta_path)
         def save_to_memmap(arr, shape, dtype, path):
@@ -341,15 +343,15 @@ class PianoSampleDataset(Dataset):
         save_to_memmap(audio.numpy(), (audio_length,), 'int16', 
                        audio_path.replace('.flac', '_audio.npy'))
         save_to_memmap(label.numpy(), (n_steps, n_keys), 'uint8',
-                       audio_path.replace('.flac', '_label.npy'))
+                       audio_path.replace('.flac', f'_label_{HOP}.npy'))
         save_to_memmap(pedal_label.numpy(), (n_steps, 2), 'uint8',
-                       audio_path.replace('.flac', '_pedal_label.npy'))
+                       audio_path.replace('.flac', f'_pedal_label_{HOP}.npy'))
         save_to_memmap(velocity.numpy(), (n_steps, n_keys), 'uint8',
-                       audio_path.replace('.flac', '_velocity.npy'))
+                       audio_path.replace('.flac', f'_velocity_{HOP}.npy'))
         save_to_memmap(last_onset_time.numpy().astype(np.uint16), (n_steps, n_keys), 'uint16',
-                       audio_path.replace('.flac', '_last_onset_time.npy'))
+                       audio_path.replace('.flac', f'_last_onset_time_{HOP}.npy'))
         save_to_memmap(last_onset_vel.numpy(), (n_steps, n_keys), 'uint8',
-                       audio_path.replace('.flac', '_last_onset_vel.npy'))
+                       audio_path.replace('.flac', f'_last_onset_vel_{HOP}.npy'))
 
 
 class MAESTRO(PianoSampleDataset):
