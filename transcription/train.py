@@ -11,6 +11,7 @@ from collections import defaultdict
 from tqdm import tqdm
 from datetime import datetime
 import time
+from matplotlib import pyplot as plt
 
 import torch as th
 import torch.distributed as dist
@@ -34,7 +35,7 @@ from .constants import HOP
 from .data import MAESTRO_V3, MAESTRO, MAPS, EmotionDataset, SMD, ViennaCorpus
 from .loss import FocalLoss
 from .evaluate import evaluate
-from .utils import summary, CustomSampler
+from .utils import summary, CustomSampler, draw_model_outs
 
 th.autograd.set_detect_anomaly(True)
 os.environ["WANDB_DISABLE_SERVICE"] = "true"
@@ -199,7 +200,9 @@ class Losses(nn.Module):
         self.vel_loss_fn = nn.MSELoss(reduction='none') # In: B x *
 
     def forward(self, logit, vel, label, vel_label):
-        frame_loss = self.frame_loss_fn(logit.permute(0, 3, 1, 2), label)
+        high_onset_mask = ((label[:, :, 67:] == 2) + (label[:, :, 67:] == 4))>0
+        damper_mask = th.cat((th.ones_like(label[:, :, :67]), high_onset_mask), dim=-1)
+        frame_loss = self.frame_loss_fn(logit.permute(0, 3, 1, 2)*damper_mask.unsqueeze(1), label*damper_mask)
         onset_mask = ((label == 2) + (label == 4))>0
         vel_loss = self.vel_loss_fn(vel*onset_mask, th.true_divide(vel_label, 128)*onset_mask)
 
@@ -229,7 +232,7 @@ def train_step(model, batch, loss_fn, optimizer, scheduler, device, config):
     scheduler.step()
     return loss, vel_loss
     
-def valid_step(model, batch, loss_fn, device, config):
+def valid_step(model, batch, loss_fn, device, config, draw=False):
     audio = batch['audio'].to(device)
     shifted_label = batch['label'].to(device)
     shifted_vel = batch['velocity'].to(device)
@@ -244,10 +247,14 @@ def valid_step(model, batch, loss_fn, device, config):
         metrics = evaluate(sample, shifted_label[n][1:], vel_out[n], shifted_vel[n][1:], band_eval=False)
         for k, v in metrics.items():
             validation_metric[k].append(v)
+    if draw:
+        fig = draw_model_outs(frame_out, vel_out)
+    else:
+        fig = None
     validation_metric['frame_loss'] = loss.mean(dim=(1,2))
     validation_metric['vel_loss'] = vel_loss.mean(dim=(1,2))
     
-    return validation_metric, frame_out, vel_out
+    return validation_metric, frame_out, vel_out, fig
 
 def test_step(model, batch, device):
     audio = batch['audio'].to(device)
@@ -376,7 +383,6 @@ def train(rank, world_size, config, ddp=True):
         )
 
         loss_fn = Losses()
-
         if rank == 0: loop = tqdm(range(step, config.iteration), total=config.iteration, initial=step)
         for epoch in range(10000):
             if ddp:
@@ -394,26 +400,17 @@ def train(rank, world_size, config, ddp=True):
                 if step % config.valid_interval == 0 or step == 5000:
                     model.eval()
 
+                    valid_log = defaultdict(list)
                     validation_metric = defaultdict(list)
                     with th.no_grad():
                         for n_valid, batch in enumerate(data_loader_valid):
-                            batch_metric, _, _ = valid_step(model, batch, loss_fn, device, config)
+                            batch_metric, _, _, fig = valid_step(model, batch, loss_fn, device, config, 
+                                                                draw=(n_valid==0))
+                            if n_valid == 0 and rank == 0:
+                                valid_log['output_img_valid'] = wandb.Image(fig)
+                                plt.close()
                             for k, v in batch_metric.items():
                                 validation_metric[k].extend(v)
-                            # for first batch, log image of feature map. shape(feature) = B C F L
-                            if n_valid == 0 and rank == 0:
-                                '''
-                                # TODO: do this with hook
-                                visual_range = 1000
-                                for n in range(config.batch_size//world_size):
-                                    fig, axes = plt.subplots(config.cnn_unit//6, 6, figsize=(8, 10))
-                                    plt.axis('off')
-                                    for m in range(config.cnn_unit):
-                                        axes[m//6, m%6].imshow(feature[n,m].numpy()[:,:visual_range], aspect='auto', origin='lower')
-                                    plt.subplots_adjust(wspace=0, hspace=0)
-                                    run.log({'valid':{f'fmap_{n}': plt}}, step=step)
-                                    plt.close()
-                                '''
 
                     valid_mean = defaultdict(list)
                     if ddp:
@@ -434,6 +431,7 @@ def train(rank, world_size, config, ddp=True):
                     
                     if rank == 0:
                         print(f'validation metric: step:{step}')
+                        valid_mean.update(valid_log)
                         run.log({'valid':valid_mean}, step=step)
                         for key, value in valid_mean.items():
                             if key[-2:] == 'f1' or 'loss' in key or key[-3:] == 'err':
@@ -595,7 +593,7 @@ if __name__ == '__main__':
     print(config)
 
     if not config.eval:
-        dataset = get_dataset(config, ['train', 'validation', 'test'], random_sample=False, transform=False)
+        dataset = get_dataset(config, ['train', 'validation', 'test'], sample_len=config.seq_len, random_sample=False, transform=False)
     else:
         dataset = get_dataset(config, None, random_sample=False, transform=False)
     dataset.initialize()
