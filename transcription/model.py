@@ -6,7 +6,7 @@ import nnAudio
 from torchaudio import transforms
 
 # from .cqt import CQT
-from .constants import SR, HOP
+from .constants import SR
 from .context import random_modification, update_context
 # from .cqt import MultiCQT
 from .midispectrogram import CombinedSpec, MidiSpec
