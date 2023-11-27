@@ -167,6 +167,134 @@ def reevalute(label_path, pred_path, onset_weight=1):
     return metric
 
 
+def evaluate_pedal(pedal_pred, pedal_label, threshold=0.05):
+    onset_est = ((pedal_pred == 2) + (pedal_pred == 4))
+    offset_est = (pedal_pred == 1)
+    frame_est = ((pedal_pred == 2) + (pedal_pred == 3) + (pedal_pred == 4))
+    onset_ref = ((pedal_label == 2) + (pedal_label == 4))
+    frame_ref = ((pedal_label == 2) + (pedal_label == 3) + (pedal_label == 4))
+    offset_ref = (pedal_label == 1)
+
+    sustain_i_ref = extract_pedal_bytedance(onset_ref, frame_ref, offset_ref)
+    sustain_i_est= extract_pedal_bytedance(onset_est, frame_est, offset_est)
+    sustain_i_ref = np.asarray(sustain_i_ref)
+    sustain_i_est = np.asarray(sustain_i_est)
+    scaling = HOP/ SR
+    if sustain_i_ref.size != 0 and sustain_i_est.size != 0: 
+        sustain_eval = evaluate_notes(
+            sustain_i_ref*scaling, 
+            np.ones(sustain_i_ref.shape[0]), 
+            sustain_i_est*scaling, 
+            np.ones(sustain_i_est.shape[0]), 
+            onset_tolerance=threshold)
+    else:
+        sustain_eval = (0.0, 0.0, 0.0, 0.0)
+
+    metrics = defaultdict(list)
+    metrics['metric/pedal/precision'] = sustain_eval[0]
+    metrics['metric/pedal/recall'] = sustain_eval[1]
+    metrics['metric/pedal/f1'] = sustain_eval[2]
+    metrics['metric/pedal/overlap'] = sustain_eval[3]
+
+    return metrics
+def extract_pedal_bytedance(
+    onsets, 
+    frames, 
+    offsets,
+    onset_threshold=0.5, 
+    frame_threshold=0.5, 
+    defalut_velocity=64, 
+    reset_offset=True):
+    # sum onset and offset together to get onset
+
+    if th.is_tensor(onsets):
+        onsets = onsets.cpu().numpy()
+    if th.is_tensor(frames):
+        frames = frames.cpu().numpy()
+    if th.is_tensor(offsets):
+        offsets = offsets.cpu().numpy()
+    frames = onsets+frames
+    frames = frames > frame_threshold
+    offsets = offsets > frame_threshold
+    sustain_pedal = pedal_detection_with_onset_offset_regress(
+        frames,
+        offsets,
+        np.zeros_like(frames),
+        0.5
+    )
+
+    if sustain_pedal:
+        starts, ends, _, _ = zip(*sustain_pedal)
+        sustain_pedal = list(zip(starts, ends))
+    else:
+        sustain_pedal = []
+
+    return sustain_pedal
+
+
+def pedal_detection_with_onset_offset_regress(frame_output, offset_output, 
+    offset_shift_output, frame_threshold):
+    """Process prediction array to pedal events information.
+    
+    Args:
+      frame_output: (frames_num,)
+      offset_output: (frames_num,)
+      offset_shift_output: (frames_num,)
+      frame_threshold: float
+    Returns: 
+      output_tuples: list of [bgn, fin, onset_shift, offset_shift], 
+      e.g., [
+        [1821, 1909, 0.4749851, 0.3048533], 
+        [1909, 1947, 0.30730522, -0.45764327], 
+        ...]
+    """
+    output_tuples = []
+    bgn = None
+    frame_disappear = None
+    offset_occur = None
+
+    if frame_output[0] >= frame_threshold:
+        bgn = 0
+
+    for i in range(1, frame_output.shape[0]):
+        if frame_output[i] >= frame_threshold and frame_output[i] > frame_output[i - 1]:
+            """Pedal onset detected"""
+            if bgn is not None:
+                pass
+            else:
+                bgn = i
+
+        if bgn is not None and i > bgn:
+            """If onset found, then search offset"""
+            if frame_output[i] <= frame_threshold and not frame_disappear:
+                """Frame disappear detected"""
+                frame_disappear = i
+
+            if offset_output[i] == 1 and not offset_occur:
+                """Offset detected"""
+                offset_occur = i
+
+            if offset_occur:
+                fin = offset_occur
+                output_tuples.append([bgn, fin, 0., offset_shift_output[fin]])
+                bgn, frame_disappear, offset_occur = None, None, None
+
+            # if frame_disappear and i - frame_disappear >= 10:
+            if frame_disappear:
+                """offset not detected but frame disappear"""
+                fin = frame_disappear
+                output_tuples.append([bgn, fin, 0., offset_shift_output[fin]])
+                bgn, frame_disappear, offset_occur = None, None, None
+    else:
+        if bgn:
+            fin = i+1
+            output_tuples.append([bgn, fin, 0., 0.])
+
+
+    # Sort pairs by onsets
+    output_tuples.sort(key=lambda pair: pair[0])
+
+    return output_tuples
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
