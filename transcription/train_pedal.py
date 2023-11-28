@@ -243,18 +243,16 @@ def test_step(model, batch, device):
     # 'gt' sampling gives very poor results since some onsets are ignored, as the model doesn't
     # have to make it.
     frame_out = model(audio)
-    shifted_pedal = batch['pedal_label'].to(device)
     # frame out: B x T x 88 x C
     frame_outs = [] 
     test_metric = defaultdict(list)
     for n in range(audio.shape[0]):
         step_len = batch['step_len'][n]
-        frame = frame_out[n][:step_len].detach().cpu()
-        frame_outs.append(frame)
-        metrics = evaluate_pedal(frame[n].argmax(-1), shifted_pedal[n][1:,0])
+        frame_outs.append(frame_out)
+        metrics = evaluate_pedal(frame_out[n].argmax(-1), batch['pedal_label'][n].detach().cpu()[1:,0])
         for k, v in metrics.items():
             test_metric[k].append(v)
-        print(f'{metrics["metric/note/f1"][0]:.4f}, {metrics["metric/note-with-offsets/f1"][0]:.4f}', batch['path'][n])
+        print(f'{metrics["metric/pedal/onset_f1"]:.4f}, {metrics["metric/pedal/offset_f1"]:.4f}', batch['path'][n])
     
     return test_metric, frame_outs
 
@@ -512,7 +510,6 @@ def train(rank, world_size, config, ddp=True):
     if ddp:
         dist.barrier()
         cleanup()
-        
     
     
 def run_demo(demo_fn, world_size, config):

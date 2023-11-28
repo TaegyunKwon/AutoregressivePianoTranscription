@@ -191,12 +191,27 @@ def evaluate_pedal(pedal_pred, pedal_label, threshold=0.05):
         sustain_eval = (0.0, 0.0, 0.0, 0.0)
 
     metrics = defaultdict(list)
-    metrics['metric/pedal/precision'] = sustain_eval[0]
-    metrics['metric/pedal/recall'] = sustain_eval[1]
-    metrics['metric/pedal/f1'] = sustain_eval[2]
+    metrics['metric/pedal/offset_precision'] = sustain_eval[0]
+    metrics['metric/pedal/offset_recall'] = sustain_eval[1]
+    metrics['metric/pedal/offset_f1'] = sustain_eval[2]
     metrics['metric/pedal/overlap'] = sustain_eval[3]
 
+    if sustain_i_ref.size != 0 and sustain_i_est.size != 0: 
+        sustain_eval = evaluate_notes(
+            sustain_i_ref*scaling, 
+            np.ones(sustain_i_ref.shape[0]), 
+            sustain_i_est*scaling, 
+            np.ones(sustain_i_est.shape[0]), 
+            onset_tolerance=threshold,
+            offset_ratio=None)
+    else:
+        sustain_eval = (0.0, 0.0, 0.0)
+    metrics['metric/pedal/onset_precision'] = sustain_eval[0]
+    metrics['metric/pedal/onset_recall'] = sustain_eval[1]
+    metrics['metric/pedal/onset_f1'] = sustain_eval[2]
+
     return metrics
+
 def extract_pedal_bytedance(
     onsets, 
     frames, 
