@@ -320,7 +320,7 @@ class PianoSampleDataset(Dataset):
             elif pedal_type == 2.0:
                 type_idx = 1
             # off->off :0, on -> off :1, off->onset :2, on -> on :3, on -> onset :4,
-            if left > 0 and label[left-1, type_idx] <= 1:
+            if left > 0 and pedal_label[left-1, type_idx] <= 1:
               pedal_label[left:onset_right, type_idx] = 2
             elif left == 0:
               pedal_label[:onset_right, type_idx] = 2
