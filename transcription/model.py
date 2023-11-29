@@ -164,6 +164,13 @@ class ARModel(nn.Module):
             self.vel_acoustic = PC_v9(config.n_mels, config.cnn_unit,
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
                                 use_film=config.film, cnn_widths=config.cnn_widths, multifc=config.multifc)
+        elif self.model == 'PC_v9_pool1':
+            self.acoustic = PC_v9_pool1(config.n_mels, config.cnn_unit,
+                                config.win_fw, config.win_bw, config.hidden_per_pitch,
+                                use_film=config.film, cnn_widths=config.cnn_widths, multifc=config.multifc)
+            self.vel_acoustic = PC_v9_pool1(config.n_mels, config.cnn_unit,
+                                config.win_fw, config.win_bw, config.hidden_per_pitch,
+                                use_film=config.film, cnn_widths=config.cnn_widths, multifc=config.multifc)
         elif self.model == 'PC_CQT':
             self.acoustic = PC_CQT(config.n_mels, config.cnn_unit,
                                 config.win_fw, config.win_bw, config.hidden_per_pitch//2,
@@ -1311,6 +1318,73 @@ class PC_v9(nn.Module):
             fc_x = F.pad(fc_x, (self.win_bw, self.win_fw)) # B H 88 L 
             fc_x = self.win_fc(fc_x)
         return fc_x.permute(0, 3, 1, 2) # B L H 88
+
+class PC_v9_pool1(nn.Module):
+    # Compact verision of PAR_v2
+    def __init__(self, n_mels, cnn_unit, win_fw, win_bw, hidden_per_pitch, use_film,
+                 cnn_widths = [3,3,3,3,3,3], multifc=True):
+        super().__init__()
+
+        self.win_fw = win_fw
+        self.win_bw = win_bw
+        self.hidden_per_pitch = hidden_per_pitch
+        self.multifc = multifc
+        # input is batch_size * 1 channel * frames * 700
+        self.cnn = nn.Sequential(
+            FilmBlock(1, cnn_unit, n_mels, use_film=use_film, width_l1=cnn_widths[0], width_l2=cnn_widths[1]),
+            nn.MaxPool2d((2, 1)),
+            nn.Dropout(0.25),
+            FilmBlock(cnn_unit, cnn_unit, n_mels//2, use_film=use_film, width_l1=cnn_widths[2], width_l2=cnn_widths[3]),
+            FilmBlock(cnn_unit, cnn_unit, n_mels//2, use_film=use_film, width_l1=cnn_widths[4], width_l2=cnn_widths[5]),
+            nn.Dropout(0.25),
+        )
+
+
+        self.shrink = nn.Sequential(
+            nn.Conv2d(cnn_unit, 4, (1, 1)),
+            nn.BatchNorm2d(4),
+            nn.ReLU(),
+            nn.Conv2d(4, 1, (1, 1)),
+            nn.ReLU()
+            )
+
+        self.fc = nn.Sequential(
+            nn.Conv1d((n_mels // 2), self.hidden_per_pitch*88, 1),
+            nn.BatchNorm1d(self.hidden_per_pitch*88),
+            nn.Dropout(0.25),
+            nn.ReLU()
+        )
+
+        self.fc_1 = nn.Sequential(
+            nn.Conv1d(hidden_per_pitch*88, hidden_per_pitch*88, 1, padding=0, groups=88),
+            nn.BatchNorm1d(self.hidden_per_pitch*88),
+            nn.ReLU()
+        ) 
+        self.fc_2 = nn.Sequential(
+            nn.Conv1d(hidden_per_pitch*88, hidden_per_pitch*88, 1, padding=0, groups=88),
+            nn.BatchNorm1d(self.hidden_per_pitch*88),
+            nn.ReLU()
+        ) 
+        # self.win_fc = nn.Linear(fc_unit*(win_fw+win_bw+1), hidden_per_pitch//2*88)
+        if multifc:
+            self.win_fc = nn.Conv2d(self.hidden_per_pitch, self.hidden_per_pitch, (1, self.win_fw+self.win_bw+1))
+        # self.pitch_linear = nn.Linear(fc_unit, self.hidden_per_pitch*88)
+
+    def forward(self, mel):
+        batch_size = mel.shape[0]
+        x = mel.unsqueeze(1)  # B 1 L F
+        x = x.transpose(2,3)  # B 1 F L
+        x = self.cnn(x)  # B C F L
+        x = self.shrink(x) # B 1 F L
+        fc_x = self.fc(x.squeeze(1)) # B 88H L
+        fc_x = self.fc_1(fc_x)
+        fc_x = self.fc_2(fc_x)
+        fc_x = fc_x.reshape(batch_size, self.hidden_per_pitch, 88, -1)
+        if self.multifc:
+            fc_x = F.pad(fc_x, (self.win_bw, self.win_fw)) # B H 88 L 
+            fc_x = self.win_fc(fc_x)
+        return fc_x.permute(0, 3, 1, 2) # B L H 88
+        
         
 class PC_v4(nn.Module):
     # two fc path, one with large conv. Channel last
