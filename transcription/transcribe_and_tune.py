@@ -175,6 +175,8 @@ def estimate_detune(y, sr, notes):
                     / np.sum(x[peak-1:peak+2])
             # p = freqs[freq_left+peak]
             detune = 1200*(p-ref)/ref
+            if detune > 50 or detune < -50:
+                continue
             detunes.append(detune)
     return np.median(detunes)        
         
@@ -220,7 +222,7 @@ if __name__ == '__main__':
         notes, frame_out, vel_out = transcribe(model, audio_tensor, Path(audio_path).parent / Path(audio_path).stem, save=False, device='cuda')
         detune = estimate_detune(audio, SR, notes)
         results.append((audio_path, detune))
-        detune = detune  # detune - 6 if want to adjust to +6
+        detune = detune - 4  # detune - 6 if want to adjust to +6
         
 
         print(f'{audio_path.stem} detune: {detune:2.1f} cents')
