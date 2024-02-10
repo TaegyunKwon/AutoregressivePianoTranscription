@@ -1,0 +1,11 @@
+{
+    "model": "HPP_FC_MIDI",
+    "n_mels": 495,
+    "noisy_condition": false,
+    "pitchwise_lstm": true,
+    "film": true,
+    "enhanced_context": true,
+    "multifc": false,
+    "frontend_filter_size": 3
+
+}

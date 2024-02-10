@@ -52,6 +52,7 @@ default_config = dict(
     lstm_unit=48,
     hidden_per_pitch=48,
     n_per_pitch=5,
+    frontend_kernel_size=7,
     fc_unit=768,
     shrink_channels=[4,1],
     batch_size=12,

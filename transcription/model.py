@@ -78,11 +78,11 @@ class ARModel(nn.Module):
             self.acoustic = HPP_FC_MIDI(config.n_mels, config.cnn_unit, config.fc_unit, 
                                 config.hidden_per_pitch,
                                 use_film=config.film, cnn_widths=config.cnn_widths, n_per_pitch=config.n_per_pitch,
-                                use_na=True)
+                                use_na=True, frontend_kernel_size=config.frontend_kernel_size)
             self.vel_acoustic = HPP_FC_MIDI(config.n_mels, config.cnn_unit, config.fc_unit, 
                                 config.hidden_per_pitch,
                                 use_film=config.film, cnn_widths=config.cnn_widths, n_per_pitch=config.n_per_pitch,
-                                use_na=True)
+                                use_na=True, frontend_kernel_size=config.frontend_kernel_size)
         elif self.model == 'PC_v8':
             self.acoustic = PC_v8(config.n_mels, config.cnn_unit, config.fc_unit, 
                                 config.win_fw, config.win_bw, config.hidden_per_pitch,
@@ -981,15 +981,15 @@ class HPP_FC_MIDI(nn.Module):
         return nn.Sequential(*modules)
 
     def __init__(self, n_mels, cnn_unit, fc_unit, hidden_per_pitch, use_film,
-                 cnn_widths = [3,3,3,3,3,3], n_per_pitch=5, use_na=False):
+                 cnn_widths = [3,3,3,3,3,3], n_per_pitch=5, use_na=False, frontend_kernel_size=7):
         super().__init__()
         # input is batch_size * 3 channel * frames * n_mels
 
         self.hidden_per_pitch = hidden_per_pitch
         self.conv_front = nn.Sequential(
-            self.get_conv2d_block(3, cnn_unit, kernel_size=7, use_film=use_film, n_f=n_mels),
-             self.get_conv2d_block(cnn_unit, cnn_unit, kernel_size=7, use_film=use_film, n_f=n_mels),
-             self.get_conv2d_block(cnn_unit, cnn_unit, kernel_size=7, use_film=use_film, n_f=n_mels))
+            self.get_conv2d_block(3, cnn_unit, kernel_size=frontend_kernel_size, use_film=use_film, n_f=n_mels),
+             self.get_conv2d_block(cnn_unit, cnn_unit, kernel_size=frontend_kernel_size, use_film=use_film, n_f=n_mels),
+             self.get_conv2d_block(cnn_unit, cnn_unit, kernel_size=frontend_kernel_size, use_film=use_film, n_f=n_mels))
         c3_out = 128
         self.hdc0 = nn.Sequential(
             HarmonicDilatedConv(cnn_unit, c3_out, n_per_pitch),
@@ -1017,8 +1017,8 @@ class HPP_FC_MIDI(nn.Module):
         self.use_na = use_na
         if use_na:
             self.na2d = nn.Sequential(
-                NeighborhoodAttention2D(dim=hidden_per_pitch, kernel_size=25, dilation=1, num_heads=4), # B W H C
-                NeighborhoodAttention2D(dim=hidden_per_pitch, kernel_size=25, dilation=1, num_heads=4)
+                NeighborhoodAttention2D(dim=hidden_per_pitch, kernel_size=13, dilation=1, num_heads=4), # B W H C
+                NeighborhoodAttention2D(dim=hidden_per_pitch, kernel_size=13, dilation=1, num_heads=4)
                 )
         
     def forward(self, x):
