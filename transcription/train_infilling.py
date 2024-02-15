@@ -241,7 +241,10 @@ def train_step(model, batch, loss_fn, optimizer, scheduler, device, config, cond
     cond = th.cat((cond_frame.unsqueeze(-1), cond_vel.unsqueeze(-1)), dim=-1) * mask.unsqueeze(-1)
         
     frame_out, vel_out = model(audio, cond, mask)
-    loss_cond, vel_loss_cond = loss_fn(frame_out, vel_out, label, vel, mask)
+    if tf_ratio == 1.0:
+        loss_cond, vel_loss_cond = loss_fn(frame_out, vel_out, label, vel, mask)
+    else:
+        loss_cond, vel_loss_cond = loss_fn(frame_out, vel_out, label, vel)
     total_loss = loss_cond.mean() + vel_loss_cond.mean()
     total_loss.mean().backward()
     for parameter in model.parameters():
@@ -278,7 +281,7 @@ def valid_step(model, batch, loss_fn, device, config):
         mask = (th.rand(label.shape[0], label.shape[1], 88) < 0.5).to(device)
         cond = th.cat((cond_frame.unsqueeze(-1), cond_vel.unsqueeze(-1)), dim=-1) * mask.unsqueeze(-1)
         frame_out, vel_out = model(audio, cond, mask)
-        loss_cond, vel_loss_cond = loss_fn(frame_out, vel_out, label, vel, mask)
+        loss_cond, vel_loss_cond = loss_fn(frame_out, vel_out, label, vel)
         for n in range(audio.shape[0]):
             sample = frame_out[n].argmax(dim=-1)
             metrics = evaluate(sample, label[n], vel_out[n].argmax(-1), vel[n], band_eval=False)
