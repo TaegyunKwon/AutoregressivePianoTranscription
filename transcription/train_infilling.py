@@ -39,6 +39,8 @@ from .utils import summary, CustomSampler
 th.autograd.set_detect_anomaly(True)
 os.environ["WANDB_DISABLE_SERVICE"] = "true"
 
+scaler = th.cuda.amp.GradScaler(enabled=True)
+
 def remove_progress(captured_out):
     lines = (line for line in captured_out.splitlines() if ('it/s]' not in line) and ('s/it]' not in line))
     return '\n'.join(lines)
@@ -67,7 +69,7 @@ default_config = dict(
     n_epoch = 100,
     noisy_condition=True,
     valid_interval=10000,
-    valid_seq_len=160256*3,
+    valid_seq_len=160256*2,
     enhanced_context=True,
     multifc=True,
     cnn_widths = [3,3,3,3,3,3],
@@ -210,21 +212,26 @@ class Losses(nn.Module):
         return frame_loss, vel_loss
     
 
+def schedule(t_max, a_min = 0.05, a_max=0.5):
+    # incresing schedule from a_min to a_max
+    alpha = a_min + (a_max - a_min) * (np.arange(t_max) / t_max)
+    return alpha
+
 def train_step(model, batch, loss_fn, optimizer, scheduler, device, config, cond_ratio=0.5, tf_ratio=1.0):
     # non-conditioned step
-    for param in model.parameters():
-        param.grad = None
     audio = batch['audio'].to(device)
     label = batch['label'][:,1:].to(device)
     vel = batch['velocity'][:,1:].to(device)
+    # with th.autocast(device_type='cuda', dtype=th.float16, enabled=True):
+    for param in model.parameters():
+        param.grad = None
     frame_out, vel_out = model(audio, th.zeros((label.shape[0], label.shape[1], 88, 2)).to(device), 
-                               th.zeros((label.shape[0], label.shape[1], 88)).to(device)
-                               )
+                            th.zeros((label.shape[0], label.shape[1], 88)).to(device)
+                            )
     loss, vel_loss = loss_fn(frame_out, vel_out, label, vel)
-    total_loss = loss.mean() + vel_loss.mean()
-    optimizer.zero_grad()
-    total_loss.mean().backward()
-
+    total_loss = (loss.mean() + vel_loss.mean())
+    total_loss.backward(retain_graph=True)
+    # scaler.scale(total_loss).backward()
     # conditioned step
     if 0.0< tf_ratio < 1.0:
         selecter = (th.rand(label.shape[0], label.shape[1], 88) < tf_ratio).to(device)
@@ -237,22 +244,30 @@ def train_step(model, batch, loss_fn, optimizer, scheduler, device, config, cond
         cond_frame = frame_out.argmax(dim=-1).detach()
         cond_vel = vel_out.argmax(dim=-1).detach()
         
+    cond_frame = cond_frame.to(th.float) / 5
+    cond_vel = cond_vel.to(th.float) / 128
     mask = (th.rand(label.shape[0], label.shape[1], 88) < cond_ratio).to(device)
     cond = th.cat((cond_frame.unsqueeze(-1), cond_vel.unsqueeze(-1)), dim=-1) * mask.unsqueeze(-1)
         
+    # with th.autocast(device_type='cuda', dtype=th.float16, enabled=True):
     frame_out, vel_out = model(audio, cond, mask)
     if tf_ratio == 1.0:
         loss_cond, vel_loss_cond = loss_fn(frame_out, vel_out, label, vel, mask)
     else:
         loss_cond, vel_loss_cond = loss_fn(frame_out, vel_out, label, vel)
     total_loss = loss_cond.mean() + vel_loss_cond.mean()
-    total_loss.mean().backward()
+    total_loss.backward()
+    # scaler.scale(total_loss).backward()
+    # scaler.unscale_(optimizer)
     for parameter in model.parameters():
         clip_grad_norm_([parameter], 3.0)
+    # scaler.step(optimizer)
+    # scaler.update()
     optimizer.step()
+    optimizer.zero_grad()
     scheduler.step()
     
-
+    
     return loss, vel_loss, loss_cond, vel_loss_cond
     
 def valid_step(model, batch, loss_fn, device, config):
@@ -261,9 +276,10 @@ def valid_step(model, batch, loss_fn, device, config):
     vel = batch['velocity'][:,1:].to(device)
     validation_metric = defaultdict(list)
 
+    # with th.autocast(device_type='cuda', dtype=th.float16, enabled=True):
     frame_out, vel_out = model(audio, th.zeros((label.shape[0], label.shape[1], 88, 2)).to(device), 
-                               th.zeros((label.shape[0], label.shape[1], 88)).to(device)
-                               )
+                            th.zeros((label.shape[0], label.shape[1], 88)).to(device)
+                            )
     # frame out: B x T x 88 x C
     loss, vel_loss = loss_fn(frame_out, vel_out, label, vel)
 
@@ -275,20 +291,34 @@ def valid_step(model, batch, loss_fn, device, config):
     validation_metric['frame_loss_iter0'] = loss.mean(dim=(1,2))
     validation_metric['vel_loss_iter0'] = vel_loss.mean(dim=(1,2))
 
-    for iter in range(1,3):
-        cond_frame = frame_out.argmax(dim=-1)
-        cond_vel = vel_out.argmax(dim=-1)
-        mask = (th.rand(label.shape[0], label.shape[1], 88) < 0.5).to(device)
-        cond = th.cat((cond_frame.unsqueeze(-1), cond_vel.unsqueeze(-1)), dim=-1) * mask.unsqueeze(-1)
+    cond_frame = frame_out.detach().argmax(dim=-1)
+    cond_vel = vel_out.detach().argmax(dim=-1)
+
+    # iters = [1, 2, 4, 8, 16, 32, 64]
+    # mask_schedule = schedule(64)
+    # for iter in tqdm(range(64)):
+    iters = [1, 2, 4, 8, 16]
+    mask_schedule = schedule(16)
+    for iter in tqdm(range(16)):
+        mask = (th.rand(label.shape[0], label.shape[1], 88) < mask_schedule[iter]).to(device)
+        cond = th.cat((cond_frame.unsqueeze(-1)/5, cond_vel.unsqueeze(-1)/128), dim=-1) * mask.unsqueeze(-1)
+        # with th.autocast(device_type='cuda', dtype=th.float16, enabled=True):
         frame_out, vel_out = model(audio, cond, mask)
-        loss_cond, vel_loss_cond = loss_fn(frame_out, vel_out, label, vel)
-        for n in range(audio.shape[0]):
-            sample = frame_out[n].argmax(dim=-1)
-            metrics = evaluate(sample, label[n], vel_out[n].argmax(-1), vel[n], band_eval=False)
-            for k, v in metrics.items():
-                validation_metric[k + f'_iter{iter}'].append(v)
-        validation_metric[f'frame_loss_iter{iter}'] = loss_cond.mean(dim=(1,2))
-        validation_metric[f'vel_loss_iter{iter}'] = vel_loss_cond.mean(dim=(1,2))
+        loss_cond, vel_loss_cond = loss_fn(frame_out, vel_out, label, vel, mask)
+
+        frame_cat = cond_frame * mask + frame_out.argmax(dim=-1).detach() * ~mask
+        vel_cat = cond_vel * mask + vel_out.argmax(dim=-1).detach() * ~mask
+        cond_frame = frame_cat
+        cond_vel = vel_cat
+
+        if iter +1 in iters:
+            for n in range(audio.shape[0]):
+                sample = frame_cat[n]
+                metrics = evaluate(sample, label[n], vel_cat[n], vel[n], band_eval=False)
+                for k, v in metrics.items():
+                    validation_metric[k + f'_iter{iter+1}'].append(v)
+            validation_metric[f'frame_loss_iter{iter+1}'] = loss_cond.mean(dim=(1,2))
+            validation_metric[f'vel_loss_iter{iter+1}'] = vel_loss_cond.mean(dim=(1,2))
     
     return validation_metric, frame_out, vel_out
 
@@ -417,6 +447,7 @@ def train(rank, world_size, config, ddp=True):
         )
 
         loss_fn = Losses()
+        mask_schedule = schedule(64)
 
         if rank == 0: loop = tqdm(range(step, config.iteration), total=config.iteration, initial=step)
         for epoch in range(10000):
@@ -428,6 +459,7 @@ def train(rank, world_size, config, ddp=True):
                     break
                 if rank ==0: loop.update(1)
                 model.train()
+                '''
                 if step < 5000:
                     cond_ratio = 0.5
                     tf_ratio = 1.0
@@ -437,6 +469,10 @@ def train(rank, world_size, config, ddp=True):
                 else:
                     cond_ratio = 0.5
                     tf_ratio = 0.0
+                '''
+                tf_ratio = 0.0
+                toss = np.random.randint(0, 64)
+                cond_ratio = mask_schedule[toss]
                     
                 loss, vel_loss, loss_cond, loss_vel_cond= train_step(model, batch, loss_fn, optimizer, scheduler, device, config, cond_ratio, tf_ratio)
                 if rank == 0:
