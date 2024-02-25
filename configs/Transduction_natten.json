@@ -1,0 +1,6 @@
+{
+    "n_mels": 495,
+    "frontend_filter_size": 3,
+    "hidden_per_pitch": 128
+
+}
