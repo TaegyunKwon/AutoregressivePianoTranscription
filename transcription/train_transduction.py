@@ -209,9 +209,9 @@ class Losses(nn.Module):
         return frame_loss
     
 
-def schedule(t_max, a_min = 0.05, a_max=0.5):
+def schedule(t_max, a_min = 0.8, a_max=0.99):
     # incresing schedule from a_min to a_max
-    alpha = a_min + (a_max - a_min) * (np.arange(t_max) / t_max)
+    alpha = a_min + (a_max - a_min) * (np.arange(t_max) / (t_max - 1))
     return alpha
 
 def train_step(model, pretrain_model, batch, loss_fn, optimizer, scheduler, device, config, cond_ratio, tf_ratio):
@@ -222,9 +222,9 @@ def train_step(model, pretrain_model, batch, loss_fn, optimizer, scheduler, devi
     # with th.autocast(device_type='cuda', dtype=th.float16, enabled=True):
     for param in model.parameters():
         param.grad = None
-        
+    
     features = pretrain_model(audio)
-    frame_out = model(features, th.zeros((label.shape[0], label.shape[1], 88), dtype=th.int).to(device), 
+    frame_out = model(features.to(device), th.zeros((label.shape[0], label.shape[1], 88), dtype=th.int).to(device), 
                             th.zeros((label.shape[0], label.shape[1], 88), dtype=th.int).to(device)
                             )
     loss = loss_fn(frame_out, label )
@@ -245,7 +245,7 @@ def train_step(model, pretrain_model, batch, loss_fn, optimizer, scheduler, devi
     cond = cond_frame * mask
         
     # with th.autocast(device_type='cuda', dtype=th.float16, enabled=True):
-    frame_out = model(features, cond.to(th.int), mask)
+    frame_out = model(features.to(device), cond.to(th.int), mask)
     if tf_ratio == 1.0:
         loss_cond = loss_fn(frame_out, label, mask)
     else:
@@ -273,7 +273,7 @@ def valid_step(model, pretrain_model, batch, loss_fn, device, config):
 
     # with th.autocast(device_type='cuda', dtype=th.float16, enabled=True):
     features = pretrain_model(audio)
-    frame_out = model(features, th.zeros((label.shape[0], label.shape[1], 88), dtype=th.int).to(device), 
+    frame_out = model(features.to(device), th.zeros((label.shape[0], label.shape[1], 88), dtype=th.int).to(device), 
                             th.zeros((label.shape[0], label.shape[1], 88), dtype=th.int).to(device)
                             )
     # frame out: B x T x 88 x C
@@ -297,7 +297,7 @@ def valid_step(model, pretrain_model, batch, loss_fn, device, config):
         mask = (th.rand(label.shape[0], label.shape[1], 88) < mask_schedule[iter]).to(device)
         cond = cond_frame * mask
         # with th.autocast(device_type='cuda', dtype=th.float16, enabled=True):
-        frame_out  = model(features, cond.to(th.int), mask.to(th.int))
+        frame_out  = model(features.to(device), cond.to(th.int), mask.to(th.int))
         loss_cond = loss_fn(frame_out, label, mask)
 
         frame_cat = cond_frame * mask + frame_out.argmax(dim=-1).detach() * ~mask
@@ -367,11 +367,11 @@ def train(rank, world_size, config, ddp=True):
     np.random.seed(seed)
 
     pretrain_model = load_pretrain()
-    pretrain_model.to(rank)
+    pretrain_model.to(device)
     pretrain_model.eval()
     for param in pretrain_model.parameters():
         param.requires_grad = False
-    model = TransModel(config).to(rank)
+    model = TransModel(config).to(device)
     if config.resume_dir:
         model_saver = ModelSaver(config, resume=True, order='higher')
         step = model_saver.last_step
@@ -466,7 +466,7 @@ def train(rank, world_size, config, ddp=True):
                     cond_ratio = 0.5
                     tf_ratio = 0.0
                 '''
-                tf_ratio = 0.0
+                tf_ratio = 0.9
                 toss = np.random.randint(0, 64)
                 cond_ratio = mask_schedule[toss]
                     

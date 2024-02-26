@@ -22,7 +22,8 @@ class TransModel(nn.Module):
         self.hidden_per_pitch = config.hidden_per_pitch
         self.pitchwise = config.pitchwise_lstm
 
-        self.trans_model = NATTEN(config.hidden_per_pitch)
+        # self.trans_model = NATTEN(config.hidden_per_pitch)
+        self.trans_model = LSTM_NATTEN(config.hidden_per_pitch)
         self.embedding = nn.Embedding(5, 4)
         self.output = nn.Linear(24, 5)
 
@@ -116,6 +117,26 @@ class NATTEN(nn.Module):
         na_out = self.na(cat) # B x T x 88 x N
         return na_out
         
+class LSTM_NATTEN(nn.Module):
+    def __init__(self, hidden_per_pitch, window=25, n_unit=24, n_head=4, n_layers=2):
+        super().__init__()
+        self.n_head = n_head
+        self.n_layers = n_layers
+
+        self.lstm = nn.LSTM(hidden_per_pitch+5, n_unit//2, n_layers, batch_first=True, bidirectional=True)
+        self.na = nn.Sequential(*([NeighborhoodAttention2D(n_unit, 4, window)]* n_layers))
+
+
+    def forward(self, x):
+        B = x.shape[0]
+        H = x.shape[-1]
+        T = x.shape[1]
+        # x: B x T x 88 x H+5
+        x = x.permute(0, 2, 1, 3).reshape(B*88, T, H)
+        x, c = self.lstm(x)  
+        x = x.reshape(B, 88, T, -1).permute(0,2,1,3)
+        na_out = self.na(x) # B x T x 88 x N
+        return na_out
 
         
 
