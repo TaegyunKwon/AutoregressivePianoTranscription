@@ -313,27 +313,72 @@ def valid_step(model, pretrain_model, batch, loss_fn, device, config):
     del cond_frame, frame_cat
     return validation_metric, frame_out
 
-def test_step(model, batch, device):
-    audio = batch['audio'].to(device)
-    frame_out, vel_out = model(audio, last_states=None, random_condition=False, sampling='argmax')
-    # frame out: B x T x 88 x C
-    frame_outs = [] 
-    vel_outs = []
+def test_step(model, pretrain_model, batch, device):
+    audio = batch['audio']
+    B = audio.shape[0]
     test_metric = defaultdict(list)
+
+    audio_len = audio.shape[1]
+    n_step = (audio_len - 1) // HOP+ 1
+    shape = (audio.shape[0], n_step, 88)
+    seg_len = 800
+    overlap = 50
+    n_pow = 6
+    steps = pow(2, n_pow)
+    iters = [pow(2, e) for e in range(n_pow+1)]
+    mask_schedule = schedule(steps, 0.8, 1)
+
+    n_seg = (n_step - overlap) // (seg_len - overlap) + 1
+    frame_out_iter0 = th.zeros(shape, dtype=th.int)
+    frame_out_iter64 = th.zeros(shape, dtype=th.int)
+
+    for seg in tqdm(range(n_seg)):
+        start = seg * (seg_len - overlap)
+        end = start + seg_len
+        if end > n_step:
+            audio_seg = audio[:, int(start*16000/512):]
+            audio_len = audio_seg.shape[1]
+            audio_pad = F.pad(audio_seg, (0, seg_len*512 - audio_len))
+            features = pretrain_model(audio_pad.to(device))
+        else:
+            features = pretrain_model(audio[:, int(start*512):int(end*512)].to(device))
+        frame_init = model(features.to(device), th.zeros((B, seg_len, 88), dtype=th.int).to(device), 
+                            th.zeros((B, seg_len, 88), dtype=th.int).to(device)
+                            )
+        # sampling step
+        cond_frame = frame_init.detach().argmax(dim=-1)
+        if seg == 0:
+            frame_out_iter0[:, :end-overlap//2] = cond_frame[:, :-overlap//2]
+        elif seg == n_seg - 1:
+            frame_out_iter0[:, start+overlap//2:] = cond_frame[:, overlap//2:n_step-start]
+        else:
+            frame_out_iter0[:, start+overlap//2:end-overlap//2] = cond_frame[:, overlap//2:-overlap//2]
+        for iter in range(steps):
+            mask = (th.rand(cond_frame.shape[0], cond_frame.shape[1], 88) < mask_schedule[iter]).to(device)
+            cond = cond_frame * mask
+            # with th.autocast(device_type='cuda', dtype=th.float16, enabled=True):
+            frame_out  = model(features.to(device), cond.to(th.int).to(device), mask.to(th.int).to(device))
+
+            frame_cat = cond_frame * mask + frame_out.argmax(dim=-1).detach() * ~mask
+            cond_frame = frame_cat
+        if seg == 0:
+            frame_out_iter64[:, :end-overlap//2] = cond_frame[:, :-overlap//2]
+        elif seg == n_seg - 1:
+            frame_out_iter64[:, start+overlap//2:] = cond_frame[:, overlap//2:n_step-start]
+        else:
+            frame_out_iter64[:, start+overlap//2:end-overlap//2] = cond_frame[:, overlap//2:-overlap//2]
     for n in range(audio.shape[0]):
+        label = batch['label'][n][1:]
+        vel = batch['velocity'][n][1:]
         step_len = batch['step_len'][n]
-        frame = frame_out[n][:step_len].detach().cpu()
-        vel = vel_out[n][:step_len].detach().cpu()
-        frame_outs.append(frame)
-        vel_outs.append(vel)
-        sample = frame.argmax(dim=-1)
-        metrics = evaluate(sample, batch['label'][n].detach().cpu()[1:],
-                           vel, batch['velocity'][n].detach().cpu()[1:], band_eval=False)
+        metrics_init = evaluate(frame_out_iter0[n][:step_len], label, vel, vel, band_eval=False)
+        metrics = evaluate(frame_out_iter64[n][:step_len], label, vel, vel, band_eval=False)
+        for k, v in metrics_init.items():
+            test_metric[k + f'_init'].append(v) 
         for k, v in metrics.items():
-            test_metric[k].append(v)
-        print(f'{metrics["metric/note/f1"][0]:.4f}, {metrics["metric/note-with-offsets/f1"][0]:.4f}', batch['path'][n])
-    
-    return test_metric, frame_outs, vel_outs
+            test_metric[k + f'_iter64'].append(v) 
+        
+    return test_metric, frame_out_iter0, frame_out_iter64
 
 class PadCollate:
     def __call__(self, data):
@@ -566,13 +611,13 @@ def train(rank, world_size, config, ddp=True):
     iterator = data_loader_test
     with th.no_grad():
         for batch in iterator:
-            batch_metric, preds, vel_preds = test_step(model, batch, device)
+            batch_metric, preds_init, preds = test_step(model, pretrain_model, batch, device)
             for k, v in batch_metric.items():
                 test_metrics[k].extend(v)
             for n in range(len(preds)):
                 pred = preds[n].detach().cpu().numpy()
-                vel = vel_preds[n].detach().cpu().numpy()
-                np.savez(Path(SAVE_PATH) / (Path(batch['path'][n]).stem + '.npz'), pred=pred, vel=vel)
+                pred_init = preds_init[n].detach().cpu().numpy()
+                np.savez(Path(SAVE_PATH) / (Path(batch['path'][n]).stem + '.npz'), pred=pred, pred_init=pred_init)
 
     test_mean = defaultdict(list)
     if ddp:
