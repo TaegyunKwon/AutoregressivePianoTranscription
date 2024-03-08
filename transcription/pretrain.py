@@ -56,9 +56,9 @@ class ARModel(nn.Module):
                 audio[:, start: end],
                 unpad_start=unpad_start, unpad_end=unpad_end)
             if step == seg_edges[-1]:
-                frame[:, offset:] = conv_out.detach().cpu()
+                frame[:, offset:] = conv_out
             else:
-                frame[:, offset:offset+max_step] = conv_out[:, :max_step].detach().cpu()
+                frame[:, offset:offset+max_step] = conv_out[:, :max_step]
         return frame
 
     def local_forward(self, audio, unpad_start=False, unpad_end=False):
