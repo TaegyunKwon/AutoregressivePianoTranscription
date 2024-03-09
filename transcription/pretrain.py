@@ -26,7 +26,7 @@ class ARModel(nn.Module):
             n_segs -= 1
         seg_edges = [el*max_step for el in range(n_segs)]
 
-        frame = th.zeros((batch_size, step_len, 128, 88))
+        frame = th.zeros((batch_size, step_len, 128, 88)).to(audio.device)
 
         offset = 0
 

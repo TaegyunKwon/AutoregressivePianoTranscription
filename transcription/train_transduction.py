@@ -42,6 +42,23 @@ os.environ["WANDB_DISABLE_SERVICE"] = "true"
 
 scaler = th.cuda.amp.GradScaler(enabled=True)
 
+def make_masks(shape, n_iter=10, block_size=10):
+    # make masks for time and frequency.
+    # shape: (B, T, F)
+    # T x F array is sliced inth blocks, and each blocks are masked at least ones.
+    n_block = ((shape[1] - 1) // block_size + 1) * shape[2]
+    block_seq = np.arange(n_block)
+    np.random.shuffle(block_seq)
+    masks = [th.ones(shape, dtype=th.bool) for _ in range(n_iter)]
+    n_seq = n_block // n_iter
+    for n in range(n_iter):
+        for block in block_seq[n*n_seq:(n+1)*n_seq]:
+            t = block // shape[2] * block_size
+            f = block % shape[2]
+            masks[n][:,t:t+block_size, f] = False
+    return masks
+    
+
 def remove_progress(captured_out):
     lines = (line for line in captured_out.splitlines() if ('it/s]' not in line) and ('s/it]' not in line))
     return '\n'.join(lines)
@@ -74,6 +91,7 @@ default_config = dict(
     enhanced_context=True,
     multifc=True,
     cnn_widths = [3,3,3,3,3,3],
+    tf_ratio=0.9,
     debug=False,
     seed=1000,
     resume_dir=None,
@@ -241,7 +259,9 @@ def train_step(model, pretrain_model, batch, loss_fn, optimizer, scheduler, devi
         cond_frame = frame_out.argmax(dim=-1).detach()
         
     cond_frame = cond_frame.to(th.float)
-    mask = (th.rand(label.shape[0], label.shape[1], 88) < cond_ratio).to(device)
+    n_iter = np.random.choice([10, 20, 30])
+    mask = make_masks(cond_frame.shape, n_iter, 10)[0].to(device)
+    # mask = (th.rand(label.shape[0], label.shape[1], 88) < cond_ratio).to(device)
     cond = cond_frame * mask
         
     # with th.autocast(device_type='cuda', dtype=th.float16, enabled=True):
@@ -291,10 +311,18 @@ def valid_step(model, pretrain_model, batch, loss_fn, device, config):
     # iters = [1, 2, 4, 8, 16, 32, 64]
     # mask_schedule = schedule(64)
     # for iter in tqdm(range(64)):
-    iters = [1, 2, 4, 8, 16]
-    mask_schedule = schedule(16)
-    for iter in tqdm(range(16)):
-        mask = (th.rand(label.shape[0], label.shape[1], 88) < mask_schedule[iter]).to(device)
+    # iters = [1, 2, 4, 8, 16]
+    # mask_schedule = schedule(16)
+    iters = [1, 2, 10, 20, 30]
+    masks_10 = make_masks(cond_frame.shape, 10, 10)
+    masks_20 = make_masks(cond_frame.shape, 20, 10)
+    for iter in tqdm(range(30)):
+        # mask = (th.rand(label.shape[0], label.shape[1], 88) < mask_schedule[iter]).to(device)
+        if iter < 10:
+            mask = masks_10[iter].to(device)
+        else:
+            mask = masks_20[iter-10].to(device)
+
         cond = cond_frame * mask
         # with th.autocast(device_type='cuda', dtype=th.float16, enabled=True):
         frame_out  = model(features, cond.to(th.int), mask.to(th.int))
@@ -323,10 +351,11 @@ def test_step(model, pretrain_model, batch, device):
     shape = (audio.shape[0], n_step, 88)
     seg_len = 800
     overlap = 50
-    n_pow = 6
-    steps = pow(2, n_pow)
-    iters = [pow(2, e) for e in range(n_pow+1)]
-    mask_schedule = schedule(steps, 0.8, 1)
+    # n_pow = 6
+    # steps = pow(2, n_pow)
+    # iters = [pow(2, e) for e in range(n_pow+1)]
+    # mask_schedule = schedule(steps, 0.8, 1)
+    steps = 60
 
     n_seg = (n_step - overlap) // (seg_len - overlap) + 1
     frame_out_iter0 = th.zeros(shape, dtype=th.int)
@@ -353,8 +382,18 @@ def test_step(model, pretrain_model, batch, device):
             frame_out_iter0[:, start+overlap//2:] = cond_frame[:, overlap//2:n_step-start]
         else:
             frame_out_iter0[:, start+overlap//2:end-overlap//2] = cond_frame[:, overlap//2:-overlap//2]
-        for iter in range(steps):
-            mask = (th.rand(cond_frame.shape[0], cond_frame.shape[1], 88) < mask_schedule[iter]).to(device)
+        masks_10 = make_masks(cond_frame.shape, 10, 10)
+        masks_20 = make_masks(cond_frame.shape, 20, 10)
+        masks_30 = make_masks(cond_frame.shape, 30, 10)
+        for iter in tqdm(range(60)):
+            # mask = (th.rand(label.shape[0], label.shape[1], 88) < mask_schedule[iter]).to(device)
+            if iter < 10:
+                mask = masks_10[iter].to(device)
+            elif iter < 30:
+                mask = masks_20[iter-10].to(device)
+            else:
+                mask = masks_30[iter-30].to(device)
+            # mask = (th.rand(cond_frame.shape[0], cond_frame.shape[1], 88) < mask_schedule[iter]).to(device)
             cond = cond_frame * mask
             # with th.autocast(device_type='cuda', dtype=th.float16, enabled=True):
             frame_out  = model(features.to(device), cond.to(th.int).to(device), mask.to(th.int).to(device))
@@ -515,7 +554,7 @@ def train(rank, world_size, config, ddp=True):
                     cond_ratio = 0.5
                     tf_ratio = 0.0
                 '''
-                tf_ratio = 0.8
+                tf_ratio = config.tf_ratio
                 toss = np.random.randint(0, 64)
                 cond_ratio = mask_schedule[toss]
                     
