@@ -31,7 +31,7 @@ from adabelief_pytorch import AdaBelief
 
 from .model_trans import TransModel
 from .constants import HOP
-from .data import MAESTRO_V3, MAESTRO, MAPS, EmotionDataset, SMD, ViennaCorpus
+from .data_trans import MAESTRO_V3, MAESTRO, MAPS, EmotionDataset, SMD, ViennaCorpus
 from .loss import FocalLoss
 from .evaluate import evaluate
 from .utils import summary, CustomSampler
@@ -108,7 +108,7 @@ default_config = dict(
     lr=1e-3,
     n_epoch = 100,
     noisy_condition=True,
-    valid_interval=10000,
+    valid_interval=5000,
     valid_seq_len=160256*2,
     enhanced_context=True,
     multifc=True,
@@ -264,29 +264,25 @@ def train_step(model, pretrain_model, batch, loss_fn, optimizer, scheduler, devi
         param.grad = None
     
     features = pretrain_model(audio)
-    frame_out = model(features, 5*th.ones((label.shape[0], label.shape[1], 88), dtype=th.int).to(device), 
-                            th.zeros((label.shape[0], label.shape[1], 88), dtype=th.int).to(device)
-                            )
-    loss = loss_fn(frame_out, label )
-    total_loss = loss.mean()
-    total_loss.backward()
+    frame_out = batch['pred_r'].to(device)
+
     # scaler.scale(total_loss).backward()
     # conditioned step
     if 0.0< tf_ratio < 1.0:
         selecter = (th.rand(label.shape[0], label.shape[1], 88) < tf_ratio).to(device)
-        cond_frame = selecter * label + ~selecter * frame_out.argmax(dim=-1).detach()
+        cond_frame = selecter * label + ~selecter * frame_out.detach()
     elif tf_ratio == 1.0:
         cond_frame = label
     elif tf_ratio == 0.0:
-        cond_frame = frame_out.argmax(dim=-1).detach()
+        cond_frame = frame_out.detach()
         
     # n_iter = np.random.choice([10, 20, 30])
     # mask = make_masks(cond_frame.shape, n_iter, 10)[0].to(device)
 
-    # n_iter = np.random.choice([5, 9])
-    # mask = make_pitch_masks(cond_frame.shape, n_iter, cyclic=True)[0].to(device)
+    n_iter = np.random.choice([5, 9])
+    mask = make_pitch_masks(cond_frame.shape, n_iter, cyclic=True)[0].to(device)
 
-    mask = (th.rand(label.shape[0], label.shape[1], 88) < cond_ratio).to(device)
+    # mask = (th.rand(label.shape[0], label.shape[1], 88) < cond_ratio).to(device)
     cond = cond_frame * mask + ~mask*5
         
     # with th.autocast(device_type='cuda', dtype=th.float16, enabled=True):
@@ -307,8 +303,7 @@ def train_step(model, pretrain_model, batch, loss_fn, optimizer, scheduler, devi
     optimizer.zero_grad()
     scheduler.step()
     
-    
-    return loss, loss_cond
+    return loss_cond
     
 def valid_step(model, pretrain_model, batch, loss_fn, device, config):
     audio = batch['audio'].to(device)
@@ -318,32 +313,27 @@ def valid_step(model, pretrain_model, batch, loss_fn, device, config):
 
     # with th.autocast(device_type='cuda', dtype=th.float16, enabled=True):
     features = pretrain_model(audio)
-    frame_out = model(features, 5*th.ones((label.shape[0], label.shape[1], 88), dtype=th.int).to(device), 
-                            th.zeros((label.shape[0], label.shape[1], 88), dtype=th.int).to(device)
-                            )
-    # frame out: B x T x 88 x C
-    loss = loss_fn(frame_out, label)
+    frame_out = batch['pred_r'].to(device)
 
     for n in range(audio.shape[0]):
-        sample = frame_out[n].argmax(dim=-1)
+        sample = frame_out[n]
         metrics = evaluate(sample, label[n], vel[n], vel[n], band_eval=False)
         for k, v in metrics.items():
             validation_metric[k + '_iter0'].append(v)
-    validation_metric['frame_loss_iter0'] = loss.mean(dim=(1,2))
 
-    cond_frame = frame_out.detach().argmax(dim=-1)
+    cond_frame = frame_out.detach()
 
     # iters = [1, 2, 4, 8, 16, 32, 64]
     # mask_schedule = schedule(64)
     # for iter in tqdm(range(64)):
-    iters = [1, 2, 4, 8, 16]
-    mask_schedule = schedule(16)
+
+    # iters = [1, 2, 4, 8, 16]
+    # mask_schedule = schedule(16)
 
     # iters = [1, 2, 10, 20, 30]
     # masks_10 = make_masks(cond_frame.shape, 10, 10)
     # masks_20 = make_masks(cond_frame.shape, 20, 10)
 
-    '''
     iters = [1, 2, 5, 6, 7, 14, 28, 42, 70]
     masks = []
     for n in range(5):
@@ -352,15 +342,14 @@ def valid_step(model, pretrain_model, batch, loss_fn, device, config):
         masks.extend(make_pitch_masks(cond_frame.shape, 9, cyclic=True))
 
     for iter in tqdm(range(14*5)):
-    '''
-    for iter in tqdm(range(16)):
-        mask = (th.rand(label.shape[0], label.shape[1], 88) < mask_schedule[iter]).to(device)
+        # for iter in tqdm(range(16)):
+        # mask = (th.rand(label.shape[0], label.shape[1], 88) < mask_schedule[iter]).to(device)
 
         # if iter < 10:
         #     mask = masks_10[iter].to(device)
         # else:
         #     mask = masks_20[iter-10].to(device)
-        # mask = masks[iter].to(device)
+        mask = masks[iter].to(device)
 
         cond = cond_frame * mask + ~mask*5
         # with th.autocast(device_type='cuda', dtype=th.float16, enabled=True):
@@ -393,11 +382,10 @@ def test_step(model, pretrain_model, batch, device):
     
     n_pow = 6
     steps = pow(2, n_pow)
-    iters = [pow(2, e) for e in range(n_pow+1)]
-    mask_schedule = schedule(steps, 0.8, 1)
+    # iters = [pow(2, e) for e in range(n_pow+1)]
+    # mask_schedule = schedule(steps, 0.8, 1)
 
     n_seg = (n_step - overlap) // (seg_len - overlap) + 1
-    frame_out_iter0 = th.zeros(shape, dtype=th.int)
     frame_out_iter64 = th.zeros(shape, dtype=th.int)
 
     for seg in tqdm(range(n_seg)):
@@ -410,17 +398,9 @@ def test_step(model, pretrain_model, batch, device):
             features = pretrain_model(audio_pad.to(device))
         else:
             features = pretrain_model(audio[:, int(start*512):int(end*512)].to(device))
-        frame_init = model(features.to(device), 5*th.ones((B, seg_len, 88), dtype=th.int).to(device), 
-                            th.zeros((B, seg_len, 88), dtype=th.int).to(device)
-                            )
+        frame_init = batch['pred_r'].to(device)
         # sampling step
-        cond_frame = frame_init.detach().argmax(dim=-1)
-        if seg == 0:
-            frame_out_iter0[:, :end-overlap//2] = cond_frame[:, :-overlap//2]
-        elif seg == n_seg - 1:
-            frame_out_iter0[:, start+overlap//2:] = cond_frame[:, overlap//2:n_step-start]
-        else:
-            frame_out_iter0[:, start+overlap//2:end-overlap//2] = cond_frame[:, overlap//2:-overlap//2]
+        cond_frame = frame_init.detach()
 
         '''
         masks_10 = make_masks(cond_frame.shape, 10, 10)
@@ -436,17 +416,17 @@ def test_step(model, pretrain_model, batch, device):
                 mask = masks_30[iter-30].to(device)
         '''
 
-        # masks = []
-        # for n in range(5):
-        #     masks.extend(make_pitch_masks(cond_frame.shape, 5, cyclic=True))
-        # for n in range(5):
-        #     masks.extend(make_pitch_masks(cond_frame.shape, 9, cyclic=True))
+        masks = []
+        for n in range(5):
+            masks.extend(make_pitch_masks(cond_frame.shape, 5, cyclic=True))
+        for n in range(5):
+            masks.extend(make_pitch_masks(cond_frame.shape, 9, cyclic=True))
 
-        # for iter in tqdm(range(14*5)):
-        #     mask = masks[iter].to(device)
-        for iter in tqdm(range(64)):
+        for iter in tqdm(range(14*5)):
+            mask = masks[iter].to(device)
+            # for iter in tqdm(range(64)):
 
-            mask = (th.rand(cond_frame.shape[0], cond_frame.shape[1], 88) < mask_schedule[iter]).to(device)
+            # mask = (th.rand(cond_frame.shape[0], cond_frame.shape[1], 88) < mask_schedule[iter]).to(device)
             cond = cond_frame * mask + ~mask*5
             # with th.autocast(device_type='cuda', dtype=th.float16, enabled=True):
             frame_out  = model(features.to(device), cond.to(th.int).to(device), mask.to(th.int).to(device))
@@ -465,16 +445,12 @@ def test_step(model, pretrain_model, batch, device):
         label = batch['label'][n][1:]
         vel = batch['velocity'][n][1:]
         step_len = batch['step_len'][n]
-        out_iter_0.append(frame_out_iter0[n][:step_len])
         out_iter_64.append(frame_out_iter64[n][:step_len])
-        metrics_init = evaluate(frame_out_iter0[n][:step_len], label, vel, vel, band_eval=False)
         metrics = evaluate(frame_out_iter64[n][:step_len], label, vel, vel, band_eval=False)
-        for k, v in metrics_init.items():
-            test_metric[k + f'_init'].append(v) 
         for k, v in metrics.items():
             test_metric[k + f'_iter64'].append(v)
         
-    return test_metric, out_iter_0, out_iter_64 
+    return test_metric, out_iter_64 
 
 class PadCollate:
     def __call__(self, data):
@@ -611,11 +587,10 @@ def train(rank, world_size, config, ddp=True):
                 toss = np.random.randint(0, 64)
                 cond_ratio = mask_schedule[toss]
                     
-                loss, loss_cond = train_step(model, pretrain_model, batch, loss_fn, optimizer, scheduler, device, config, cond_ratio, tf_ratio)
+                loss_cond = train_step(model, pretrain_model, batch, loss_fn, optimizer, scheduler, device, config, cond_ratio, tf_ratio)
                 if rank == 0:
-                    run.log({"train": dict(frame_loss=loss.mean(), 
-                                           frame_loss_cond=loss_cond.mean())}, step=step)
-                del loss, batch, loss_cond
+                    run.log({"train": dict(frame_loss_cond=loss_cond.mean())}, step=step)
+                del batch, loss_cond
                 if step % config.valid_interval == 0 or step == 5000:
                     model.eval()
 
@@ -664,8 +639,8 @@ def train(rank, world_size, config, ddp=True):
                         for key, value in valid_mean.items():
                             if key[-2:] == 'f1' or 'loss' in key or key[-3:] == 'err':
                                 print(f'{key} : {value}')
-                        valid_mean['metric/note/f1_iter2']
-                        model_saver.update(model, optimizer, step, valid_mean['metric/note-with-offsets/f1_iter2'], ddp=ddp)
+                        valid_mean['metric/note/f1_iter16']
+                        model_saver.update(model, optimizer, step, valid_mean['metric/note-with-offsets/f1_iter70'], ddp=ddp)
                     if ddp:
                         dist.barrier()
             if step > config.iteration:
@@ -707,13 +682,12 @@ def train(rank, world_size, config, ddp=True):
     iterator = data_loader_test
     with th.no_grad():
         for batch in iterator:
-            batch_metric, preds_init, preds = test_step(model, pretrain_model, batch, device)
+            batch_metric, preds = test_step(model, pretrain_model, batch, device)
             for k, v in batch_metric.items():
                 test_metrics[k].extend(v)
             for n in range(len(preds)):
                 pred = preds[n].detach().cpu().numpy()
-                pred_init = preds_init[n].detach().cpu().numpy()
-                np.savez(Path(SAVE_PATH) / (Path(batch['path'][n]).stem + '.npz'), pred=pred, pred_init=pred_init)
+                np.savez(Path(SAVE_PATH) / (Path(batch['path'][n]).stem + '.npz'), pred=pred)
 
     test_mean = defaultdict(list)
     if ddp:

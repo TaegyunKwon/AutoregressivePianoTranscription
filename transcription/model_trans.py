@@ -24,7 +24,8 @@ class TransModel(nn.Module):
 
         # self.trans_model = NATTEN(config.hidden_per_pitch)
         self.trans_model = LSTM_NATTEN(config.hidden_per_pitch, config.window, n_unit=config.n_unit, n_layers=config.n_layers)
-        self.embedding = nn.Embedding(5, 4)
+        # self.trans_model = LSTM_HPP(config.hidden_per_pitch, n_unit=config.n_unit)
+        self.embedding = nn.Embedding(6, 4)
         self.output = nn.Linear(config.n_unit, 5)
 
     def forward(self, features, condition, mask):
@@ -139,5 +140,28 @@ class LSTM_NATTEN(nn.Module):
         return na_out
 
         
+class LSTM_HPP(nn.Module):
+    def __init__(self, hidden_per_pitch, n_unit=24):
+        super().__init__()
+        self.lstm = nn.LSTM(hidden_per_pitch+5, n_unit//2, 2, batch_first=True, bidirectional=True)
+        self.HDC_conv = nn.Sequential(get_conv2d_block(n_unit, n_unit, kernel_size=(5,1), use_film=True, n_f=88),
+                                HarmonicDilatedConv(n_unit, n_unit, 1),
+                                get_conv2d_block(n_unit, n_unit, kernel_size=(5,1), use_film=True, n_f=88),
+                                HarmonicDilatedConv(n_unit, n_unit, 1)
+                                )
+
+
+    def forward(self, x):
+        B = x.shape[0]
+        H = x.shape[-1]
+        T = x.shape[1]
+        # x: B x T x 88 x H+5
+        x = x.permute(0, 2, 1, 3).reshape(B*88, T, H)
+        x, c = self.lstm(x)  
+        x = x.reshape(B, 88, T, -1).permute(0,3,2,1)  # B, H, T, 88
+        x = self.HDC_conv(x)
+        return x.permute(0,2,3,1)  # B, T, 88, H
+
+
 
     

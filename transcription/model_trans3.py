@@ -13,6 +13,23 @@ from .context import random_modification, update_context
 from .midispectrogram import CombinedSpec, MidiSpec
 from .model import MIDIFrontEnd, FilmLayer, HarmonicDilatedConv
 
+class ConditionEmbedding(nn.Module):
+    def __init__(self, out_dim):
+        super().__init__()
+        self.emb_layer_r = nn.Embedding(5, out_dim//4)
+        self.emb_layer_p = nn.Embedding(5, out_dim//4)
+        self.emb_layer_r_vel = nn.Embedding(128, out_dim//4)
+        self.emb_layer_p_vel = nn.Embedding(128, out_dim//4)
+
+    def forward(self, r, p, r_vel, p_vel):
+        # shape: B, T, 88
+        x1 = self.emb_layer_r(r)
+        x2 = self.emb_layer_p(p)
+        x3 = self.emb_layer_r_vel(r_vel)
+        x4 = self.emb_layer_p_vel(p_vel)
+        return th.cat((x1, x2, x3, x4), dim=-1) # B, T, 88, out_dim
+
+
 class TransModel(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -30,40 +47,62 @@ class TransModel(nn.Module):
             ConvFilmBlock(config.cnn_unit, config.cnn_unit, 3, 1, use_film=True, n_f=495),
             ConvFilmBlock(config.cnn_unit, config.cnn_unit, 3, 1, pool_size=(1,5), use_film=True, n_f=495)
             )
-        self.front_block_vel = nn.Sequential(
-            ConvFilmBlock(3, config.cnn_unit, 3, 1, use_film=True, n_f=495),
-            ConvFilmBlock(config.cnn_unit, config.cnn_unit, 3, 1, use_film=True, n_f=495),
-            ConvFilmBlock(config.cnn_unit, config.cnn_unit, 3, 1, pool_size=(1,5), use_film=True, n_f=495)
-            )
-        self.condition_block = ConditionBlock(config.n_unit)
-        self.middle_block = MiddleBlock(config.cnn_unit + config.n_unit, config.cnn_unit)
-        self.middle_block_vel = MiddleBlock(config.cnn_unit + config.n_unit, config.cnn_unit)
-        self.high_block = HighBlock(config.cnn_unit + config.n_unit, config.n_unit)
-        self.high_block_vel = HighBlock(config.cnn_unit + config.n_unit, config.n_unit)
-        self.output = nn.Linear(config.n_unit, 5)
-        self.output_vel = nn.Linear(config.n_unit, 128)
+        c3_out = 128
+        self.emb1 = ConditionEmbedding(config.cnn_unit)
+        self.conv_3 = HarmonicDilatedConv(config.cnn_unit, c3_out, 1)
+        self.emb2 = ConditionEmbedding(c3_out)
+        self.conv_4 = HarmonicDilatedConv(c3_out, c3_out, 1)
+        self.emb3 = ConditionEmbedding(c3_out)
+        self.conv_5 = HarmonicDilatedConv(c3_out, c3_out, 1)
+        self.emb4 = ConditionEmbedding(c3_out)
 
-    def forward(self, audio, condition, vel_condition, mask):
+        self.block_4 = ConvFilmBlock(c3_out, c3_out, [3,1], dilation=[1, 12], n_f=99)
+        self.block_5 = ConvFilmBlock(c3_out, c3_out, [3,1], dilation=[1, 12])
+        self.block_6 = ConvFilmBlock(c3_out, c3_out, [5,1], 1)
+        self.block_7 = ConvFilmBlock(c3_out, c3_out, [5,1], 1)
+        self.block_8 = ConvFilmBlock(c3_out, c3_out, [5,1], 1)
+
+        self.emb5 = ConditionEmbedding(c3_out)
+        self.lstm = nn.LSTM(c3_out, config.hidden_per_pitch//2, 2, batch_first=True, bidirectional=True)
+
+        self.output = nn.Linear(config.hidden_per_pitch, 5)
+
+    def forward(self, audio, r, p, r_vel, p_vel):
         # condition: B x T x 88
         # mask: B x T x 88
 
         spec = self.frontend(audio)  # B, 3, F, T
+        B = spec.shape[0]
+        T = spec.shape[3]
         x = self.front_block(spec.permute(0,1,3,2))  # B, C, T, 99
-        c = self.condition_block(condition, vel_condition, mask)  # B N T 88
-        c_pad = F.pad(c, (0, 11))  # B, N, 99, T
-        cat_level_1 = th.cat((x, c_pad), dim=1)  # B, C+N, T, 99
-        x = self.middle_block(cat_level_1)  # B, C, T, 88
-        cat_level_2 = th.cat((x, c), dim=1)  # B, C+N, T, 88
-        x = self.high_block(cat_level_2)  # B, T, 88, N
-        out = self.output(x)  # B, T, 88, 5
+        c = self.emb1(r, p, r_vel, p_vel).permute(0,3,1,2)  # B, C, T, 88
+        x = x + F.pad(c, (0,11))
+        x = self.conv_3(x)
+        c = self.emb2(r, p, r_vel, p_vel).permute(0,3,1,2)  # B, C, T, 88
+        x = x + F.pad(c, (0,11))
+        x = self.conv_4(x)
+        c = self.emb3(r, p, r_vel, p_vel).permute(0,3,1,2)  # B, C, T, 88
+        x = x+ F.pad(c, (0,11))
+        x = self.conv_5(x)
+        c = self.emb4(r, p, r_vel, p_vel).permute(0,3,1,2)  # B, C, T, 88
+        x = x+ F.pad(c, (0,11))
+        x = self.block_4(x)
+        x = x[:,:,:,:88]
 
-        x_vel = self.front_block_vel(spec.permute(0,1,3,2))  # B, C, T, 99
-        cat_level_1_vel = th.cat((x_vel, c_pad), dim=1)  # B, C+N, T, 99
-        x_vel = self.middle_block_vel(cat_level_1_vel)  # B, C, T, 88
-        cat_level_2_vel = th.cat((x_vel, c), dim=1)  # B, C+N, T, 88
-        x_vel = self.high_block_vel(cat_level_2_vel)  # B, T, 88, N
-        vel_out = self.output_vel(x_vel)  # B, T, 88, 128
-        return out, vel_out
+        x = self.block_5(x)
+        # => [b x ch x T x 88]
+        x = self.block_6(x) # + x
+        x = self.block_7(x) # + x
+        x = self.block_8(x) # + x 
+        c = self.emb5(r, p, r_vel, p_vel).permute(0,3,1,2)  # B, C, T, 88
+        x = x + c
+
+        x = x.permute(0, 3, 2, 1).reshape(B*88, T, 128)
+        x, _ = self.lstm(x)
+        x = x.reshape(B, 88, T, self.hidden_per_pitch).permute(0,2,1,3)
+        x = self.output(x) # B, T, 88, 5
+
+        return x
 
 
 class MIDIFrontEnd(nn.Module):
