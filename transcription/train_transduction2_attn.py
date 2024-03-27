@@ -29,9 +29,9 @@ import wandb
 
 from adabelief_pytorch import AdaBelief
 
-from .model_trans2 import TransModel
+from .model_trans2_attn import TransModel
 from .constants import HOP
-from .data import MAESTRO_V3, MAESTRO, MAPS, EmotionDataset, SMD, ViennaCorpus
+from .data_attn import MAESTRO_V3, MAESTRO, MAPS, EmotionDataset, SMD, ViennaCorpus
 from .loss import FocalLoss
 from .evaluate import evaluate
 from .utils import summary, CustomSampler
@@ -216,8 +216,8 @@ def schedule(t_max, a_min = 0.8, a_max=0.99):
 
 def make_pitch_mask(states, fw, fw_v, bw, bw_v, pitches):
     pitch_mask = th.zeros(88)
-    pitch_mask = pitch_mask.scatter(0, th.tensor(pitches), 1)
-    a = states * pitch_mask + states * ~pitch_mask * 5
+    pitch_mask = pitch_mask.scatter(0, th.tensor(pitches), 1).to(states.device).to(th.bool)
+    a = states * pitch_mask + ~pitch_mask * 5
     b = th.stack([fw, fw_v, bw, bw_v], dim=-2)
     b = (b * pitch_mask).permute(0, 1, 3, 2)
     return th.cat([a.unsqueeze(-1), b], dim=-1), pitch_mask
@@ -233,18 +233,18 @@ def train_step(model, batch, loss_fn, optimizer, scheduler, device, config, cond
     for param in model.parameters():
         param.grad = None
     
-    n_mask = np.round(cond_ratio*88)
+    n_mask = int(np.round(cond_ratio*88))
     perm = th.randperm(88)
     idx = perm[:n_mask]
 
-    fw = batch['last_onset_time'][:,:-1]
-    fw_v = batch['last_onset_vel'][:,:-1]
-    bw = batch['bw']
-    bw_v = batch['bw_v']
+    fw = batch['last_onset_time'][:,:-1].to(device)
+    fw_v = batch['last_onset_vel'][:,:-1].to(device)
+    bw = batch['bw'].to(device)
+    bw_v = batch['bw_v'].to(device)
     c_mask, mask = make_pitch_mask(shifted_label[:,:-1], fw, fw_v, bw, bw_v, idx)
     c_target = th.stack([shifted_label[:,:-1], fw, fw_v], -1)
 
-    frame_out, vel_out = model(audio, c_mask.to(device), c_target.to(device))
+    frame_out, vel_out = model(audio, c_mask.to(device), None, None, False, c_target.to(device))
     loss, vel_loss = loss_fn(frame_out, vel_out, shifted_label[:,1:], shifted_vel[:,1:], mask)
     total_loss = loss.sum() + vel_loss.sum()
     total_loss /= (loss.shape[0]*loss.shape[1]*(88-n_mask))
@@ -263,18 +263,19 @@ def valid_step(model, batch, loss_fn, device, config):
     audio = batch['audio'].to(device)
     shifted_label = batch['label'].to(device)
     shifted_vel = batch['velocity'].to(device)
-    fw = batch['last_onset_time'][:,:-1]
-    fw_v = batch['last_onset_vel'][:,:-1]
-    bw = batch['bw']
-    bw_v = batch['bw_v']
+    fw = batch['last_onset_time'][:,:-1].to(device)
+    fw_v = batch['last_onset_vel'][:,:-1].to(device)
+    bw = batch['bw'].to(device)
+    bw_v = batch['bw_v'].to(device)
     # with th.autocast(device_type='cuda', dtype=th.float16, enabled=True):
     for param in model.parameters():
         param.grad = None
     
-    frame = th.zeros(shifted_label.shape[0], shifted_label.shape[1]-1, 88).to(device)
-    vel = th.zeros(shifted_label.shape[0], shifted_label.shape[1]-1, 88).to(device)
+    frame = th.zeros(shifted_label.shape[0], shifted_label.shape[1]-1, 88, dtype=th.long).to(device)
+    vel = th.zeros(shifted_label.shape[0], shifted_label.shape[1]-1, 88, dtype=th.long).to(device)
     fillin_schedule = [88, 22, 11, 8]
-    n_iter = [1, 1, 2, 4]
+    # n_iter = [1, 1, 2, 4]
+    n_iter = [1, 1, 1, 1]
     validation_metric = defaultdict(list)
     for n, n_cycle in enumerate(n_iter):
         for cycle in range(n_cycle):
@@ -282,25 +283,25 @@ def valid_step(model, batch, loss_fn, device, config):
             iter_for_cycle = 88 // n_fillin
             rand_idx = np.arange(88)
             np.random.shuffle(rand_idx)
-            loss = 0
-            vel_loss = 0
+            # loss = 0
+            # vel_loss = 0
             for m in range(iter_for_cycle):
                 target_pitch = rand_idx[n_fillin*m:n_fillin*(m+1)]
-                mask_pitch = set(range(88)) - set(target_pitch)
+                mask_pitch = list(set(range(88)) - set(target_pitch))
                 c_mask, mask = make_pitch_mask(shifted_label[:,:-1], fw, fw_v, bw, bw_v, mask_pitch)
-                frame, vel, _, _ = model.inference_segment(audio, c_mask.to(device), frame, vel, target_pitch,
-                    shifted_label[:,0], fw[:,0], fw_v[:,0])
+                frame, vel = model(audio, c_mask.to(device), frame, vel, True, None, target_pitch,
+                    shifted_label[:,0], fw[:,0], fw_v[:,0], )
                 frame = frame.detach()
                 vel = vel.detach()
-                l, vel_l = loss_fn(frame, vel, shifted_label[:,1:], shifted_vel[:,1:], mask)
-                loss += l
-                vel_loss += vel_l
-            for batch in range(audio.shape[0]):
-                metrics = evaluate(frame[n], shifted_label[n,1:], vel[n], shifted_vel[n,1:])
+                # l, vel_l = loss_fn(frame, vel, shifted_label[:,1:], shifted_vel[:,1:], mask)
+                # loss += l
+                # vel_loss += vel_l
+            for b in range(audio.shape[0]):
+                metrics = evaluate(frame[b], shifted_label[b,1:], vel[b], shifted_vel[b,1:])
                 for k, v in metrics.items():
                     validation_metric[k + f'_c{n}_cycle{cycle}'].append(v)
-            validation_metric[f'frame_loss_c{n}_cycle{cycle}'] = loss.mean(dim=(1,2))
-            validation_metric[f'vel_loss_c{n}_cycle{m}'] = vel_loss.mean(dim=(1,2))
+            # validation_metric[f'frame_loss_c{n}_cycle{cycle}'] = loss.mean()
+            # validation_metric[f'vel_loss_c{n}_cycle{m}'] = vel_loss.mean()
            
     return validation_metric, frame, vel
 
@@ -509,32 +510,21 @@ def train(rank, world_size, config, ddp=True):
                     break
                 if rank ==0: loop.update(1)
                 model.train()
-                '''
-                if step < 5000:
-                    cond_ratio = 0.5
-                    tf_ratio = 1.0
-                elif 5000 <= step <= 30000:
-                    cond_ratio = 0.5
-                    tf_ratio = 0.5
-                else:
-                    cond_ratio = 0.5
-                    tf_ratio = 0.0
-                '''
-                tf_ratio = config.tf_ratio
-                toss = np.random.randint(0, 64)
-                cond_ratio = mask_schedule[toss]
+                cond_ratio = np.random.uniform(0, 0.9)
                     
-                loss, loss_cond = train_step(model, batch, loss_fn, optimizer, scheduler, device, config, cond_ratio, tf_ratio)
+                loss = train_step(model, batch, loss_fn, optimizer, scheduler, device, config, cond_ratio)
                 if rank == 0:
-                    run.log({"train": dict(frame_loss=loss.mean(), 
-                                           frame_loss_cond=loss_cond.mean())}, step=step)
-                del loss, batch, loss_cond
+                    run.log({"train": dict(frame_loss=loss.mean())}, step=step)
+                del loss, batch
                 if step % config.valid_interval == 0 or step == 5000:
                     model.eval()
 
                     validation_metric = defaultdict(list)
                     with th.no_grad():
                         for n_valid, batch in enumerate(data_loader_valid):
+                            print(n_valid)
+                            if n_valid >=10:
+                                break
                             batch_metric, frame_out, vel_out = valid_step(model, batch, loss_fn, device, config)
                             del frame_out, vel_out
                             for k, v in batch_metric.items():
@@ -577,8 +567,7 @@ def train(rank, world_size, config, ddp=True):
                         for key, value in valid_mean.items():
                             if key[-2:] == 'f1' or 'loss' in key or key[-3:] == 'err':
                                 print(f'{key} : {value}')
-                        valid_mean['metric/note/f1_iter2']
-                        model_saver.update(model, optimizer, step, valid_mean['metric/note-with-offsets/f1_iter2'], ddp=ddp)
+                        model_saver.update(model, optimizer, step, valid_mean['metric/note-with-offsets/f1_c3_cycle0'], ddp=ddp)
                     if ddp:
                         dist.barrier()
             if step > config.iteration:

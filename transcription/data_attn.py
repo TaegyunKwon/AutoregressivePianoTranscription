@@ -188,7 +188,6 @@ class PianoSampleDataset(Dataset):
                         audio_path.replace('.flac', '_{}.npy'.format(el)), save_dtype, 0,
                         (total_steps, n_feature), cast_type),
                 (0,0,self.delay,0))
-        
             result['bw'] = th_load_from_memmap(
                 audio_path.replace('.flac', '_bw.npy'), np.uint8,
                 0, (total_steps, n_feature), np.int64)
@@ -216,6 +215,8 @@ class PianoSampleDataset(Dataset):
         # result['velocity'] = result['velocity'].long()
         # result['last_onset_time'] = last_onset_time.div_(self.max_last)
         # result['last_onset_vel'] = last_onset_vel.div_(128)
+        result['last_onset_time'] = last_onset_time
+        result['last_onset_vel'] = last_onset_vel
 
         return result
 

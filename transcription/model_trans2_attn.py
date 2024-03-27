@@ -59,27 +59,73 @@ class TransModel(nn.Module):
         self.lstm_v = nn.LSTM(config.cnn_unit+4, config.lstm_unit, 2, batch_first=True, bidirectional=False)
         self.output_vel = nn.Linear(config.lstm_unit, 128)
 
-    def forward(self, audio, c_mask, c_target):
-        # c_mask: cat(last_states, f, v ,b, b_v) : B, T, 88, 5
-        x, x_vel = self.forward_mask(audio, c_mask) # B C T 88
-        B = x.shape[0]
-        T = x.shape[2]
+    def forward(self, audio, c_mask, init_frames, init_vels, infer=False, c_target=None, target_pitch=None, 
+                          init_state=None, init_onset_time=None, init_onset_vel=None,
+                          init_h=None, init_h_vel=None, unpad_start=False, unpad_end=False):
+        if not infer:
+            # c_mask: cat(last_states, f, v ,b, b_v) : B, T, 88, 5
+            x, x_vel = self.forward_mask(audio, c_mask) # B C T 88
+            B = x.shape[0]
+            T = x.shape[2]
 
-        c_fw = self.context_emb3(c_target)  # B, T, 88, N
-        x = th.cat((x, c_fw.permute(0,3,1,2)), dim=1)  # B, C+N, T, 88
-        x = x.permute(0, 3, 2, 1).reshape(B*88, T, -1)
-        x, _ = self.lstm(x)
-        x = x.reshape(B, 88, T, -1).permute(0,2,1,3)
-        output = self.output(x)  # B, T, 88, 5
+            c_fw = self.context_emb3(c_target)  # B, T, 88, N
+            x = th.cat((x, c_fw.permute(0,3,1,2)), dim=1)  # B, C+N, T, 88
+            x = x.permute(0, 3, 2, 1).reshape(B*88, T, -1)
+            x, _ = self.lstm(x)
+            x = x.reshape(B, 88, T, -1).permute(0,2,1,3)
+            output = self.output(x)  # B, T, 88, 5
 
-        c_fw = self.context_emb3_v(c_target)  # B, T, 88, N
-        x = th.cat((x_vel, c_fw.permute(0,3,1,2)), dim=1)  # B, C+N, T, 88
-        x = x.permute(0, 3, 2, 1).reshape(B*88, T, -1)
-        x, _ = self.lstm_v(x)
-        x = x.reshape(B, 88, T, -1).permute(0,2,1,3)
-        vel_out = self.output_vel(x)  # B, T, 88, 128
+            c_fw = self.context_emb3_v(c_target)  # B, T, 88, N
+            x = th.cat((x_vel, c_fw.permute(0,3,1,2)), dim=1)  # B, C+N, T, 88
+            x = x.permute(0, 3, 2, 1).reshape(B*88, T, -1)
+            x, _ = self.lstm_v(x)
+            x = x.reshape(B, 88, T, -1).permute(0,2,1,3)
+            vel_out = self.output_vel(x)  # B, T, 88, 128
 
-        return output, vel_out
+            return output, vel_out
+        if infer:
+            x, x_v = self.forward_mask(audio, c_mask, unpad_start, unpad_end) # B C T 88
+            B = x.shape[0]
+            T = x.shape[2]
+            device = x.device
+
+            
+            frame = init_frames.to(device)
+            vel = init_vels.to(device)
+
+            if init_state == None:
+                init_state = th.zeros((B, 88), dtype=th.int64)
+                init_onset_time = th.zeros((B, 88))
+                init_onset_vel = th.zeros((B, 88))
+            last_state = init_state.to(device)
+            last_onset_time = init_onset_time.to(device)
+            last_onset_vel = init_onset_vel.to(device)
+            h = init_h
+            h_vel = init_h_vel
+
+            for t in range(T):
+                c_fw = self.context_emb3(th.stack([last_state, last_onset_time, last_onset_vel], -1).unsqueeze(1)).squeeze(1)# B 88 4
+                x_t = th.cat((x[:,:,t].permute(0,2,1), c_fw), dim=-1)  # B, 88, C
+                x_t = x_t.reshape(B*88, -1)  # B*88, C
+                x_t, h = self.lstm(x_t.unsqueeze(1), h) # x: B*88, 1, N
+                out = self.output(x_t.reshape(B, 88, -1))  # B, 88, 5
+
+                c_fw = self.context_emb3_v(th.stack([last_state, last_onset_time, last_onset_vel], -1).unsqueeze(1)).squeeze(1)# B 88 4
+                x_t = th.cat((x_v[:,:,t].permute(0,2,1), c_fw), dim=-1)  # B, 88, C
+                x_t = x_t.reshape(B*88, -1)  # B*88, C
+                x_t, h_vel = self.lstm_v(x_t.unsqueeze(1), h_vel) # x: B*88, 1, N
+                vel_out = self.output_vel(x_t.reshape(B, 88, -1))  # B, 88, 128
+
+                arg_frame = out.argmax(-1)
+                arg_vel = vel_out.argmax(-1)
+                arg_vel = th.clamp(arg_vel, min=0, max=128)
+                frame[:, t, target_pitch] = arg_frame[:, target_pitch]
+                vel[:, t, target_pitch] = arg_vel[:, target_pitch]
+
+                last_onset_time, last_onset_vel = update_context(last_onset_time, last_onset_vel, frame[:, t], vel[:, t])
+                last_state = frame[:, t]
+
+            return frame, vel
 
     def forward_mask(self, audio, c_mask, unpad_start=False, unpad_end=False):
         spec = self.frontend(audio)  # B, 3, F, T
@@ -101,54 +147,6 @@ class TransModel(nn.Module):
         c2 = self.context_emb2_v(c_mask)  # B, T, 88, N
         vel_out = self.middle_block_v(x, c2)  # B C T 88
         return out, vel_out 
-        
-    def inference_segment(self, audio, c_mask, init_frames, init_vels, target_pitch=None, 
-                          init_state=None, init_onset_time=None, init_onset_vel=None,
-                          init_h=None, init_h_vel=None, unpad_start=False, unpad_end=False):
-        x, x_v = self.forward_mask(audio, c_mask, unpad_start, unpad_end) # B C T 88
-        B = x.shape[0]
-        T = x.shape[2]
-        device = x.device
-
-        
-        frame = init_frames.to(device)
-        vel = init_vels.to(device)
-
-        if init_state == None:
-            init_state = th.zeros((B, 88), dtype=th.int64)
-            init_onset_time = th.zeros((B, 88))
-            init_onset_vel = th.zeros((B, 88))
-        last_state = init_state.to(device)
-        last_onset_time = init_onset_time.to(device)
-        last_onset_vel = init_onset_vel.to(device)
-        h = init_h
-        h_vel = init_h_vel
-
-        for t in range(T):
-            c_fw = self.context_emb3(th.stack([last_state, last_onset_time, last_onset_vel], -1)) # B 88 4
-            x_t = th.cat((x[:,:,t].permute(0,2,1), c_fw), dim=-1)  # B, 88, C
-            x_t = x_t.reshape(B*88, -1)  # B*88, C
-            x_t, h = self.lstm(x_t.unsqueeze(1), h) # x: B*88, 1, N
-            out = self.output(x_t.reshape(B, 88, -1))  # B, 88, 5
-
-            c_fw = self.context_emb3_v(th.stack([last_state, last_onset_time, last_onset_vel], -1)) # B 88 4
-            x_t = th.cat((x_v[:,:,t].permute(0,2,1), c_fw), dim=-1)  # B, 88, C
-            x_t = x_t.reshape(B*88, -1)  # B*88, C
-            x_t, h_vel = self.lstm_v(x_t.unsqueeze(1), h_vel) # x: B*88, 1, N
-            vel_out = self.output_vel(x_t.reshape(B, 88, -1))  # B, 88, 128
-
-            arg_frame = out.argmax(-1)
-            arg_vel = vel_out.argmax(-1)
-            arg_vel = th.clamp(arg_vel, min=0, max=128)
-            frame[:, t, target_pitch] = arg_frame[:, target_pitch]
-            vel[:, t] = arg_vel[:, target_pitch]
-
-            last_onset_time, last_onset_vel = update_context(last_onset_time, last_onset_vel, frame[:, t], vel[:, t])
-            last_state = frame[:, t]
-
-        return frame, vel
-
-            
 
         
     def update_context(self, last_onset_time, last_onset_vel, frame, vel):
@@ -260,11 +258,13 @@ class CrossAttention(nn.Module):
     def __init__(self, cnn_unit) -> None:
         super().__init__()
     
-        self.pos_enc = sinusoids(99, cnn_unit, max_timescale=100)
-        self.pos_enc_c = sinusoids(88, cnn_unit, max_timescale=100)
+        pos_enc = sinusoids(99, cnn_unit, max_timescale=100)
+        pos_enc_c = sinusoids(88, cnn_unit, max_timescale=100)
         self.MHA = th.nn.MultiheadAttention(cnn_unit, num_heads=4, 
                                             kdim=cnn_unit, vdim=cnn_unit, dropout=0.1, batch_first=True)
-    
+        self.register_buffer('pos_enc', pos_enc)
+        self.register_buffer('pos_enc_c', pos_enc_c)
+
     def forward(self, x, c):
         # x: B, C, T, 99
         # c: B, T, 88, C2
@@ -346,8 +346,10 @@ class MiddleBlock(nn.Module):
     def __init__(self, n_input, cnn_unit):
         super().__init__()
 
-        self.pos_enc = sinusoids(88, cnn_unit, max_timescale=100)
-        self.pos_enc_c = sinusoids(88, cnn_unit, max_timescale=100)
+        pos_enc = sinusoids(88, cnn_unit, max_timescale=100)
+        pos_enc_c = sinusoids(88, cnn_unit, max_timescale=100)
+        self.register_buffer('pos_enc', pos_enc)
+        self.register_buffer('pos_enc_c', pos_enc_c)
         self.hdc0 = HarmonicDilatedConv(n_input, cnn_unit, 1)
         self.hdc1 = HarmonicDilatedConv(cnn_unit, cnn_unit, 1)
         self.MHA = th.nn.MultiheadAttention(cnn_unit, num_heads=4,
