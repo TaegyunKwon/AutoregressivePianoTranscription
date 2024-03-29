@@ -29,7 +29,7 @@ import wandb
 
 from adabelief_pytorch import AdaBelief
 
-from .model_trans2_attn import TransModel
+from .model_trans2_attn import TransModel3 as TransModel
 from .constants import HOP
 from .data_attn import MAESTRO_V3, MAESTRO, MAPS, EmotionDataset, SMD, ViennaCorpus
 from .loss import FocalLoss
