@@ -364,6 +364,7 @@ class ARModel(nn.Module):
                     c, 
                     h, 
                     vel_h)
+                # frame_out[:, 0, :, [2,4]] *= 0.9  # adjust the probability of 2 and 4
                 frame[:, step] = frame_out.squeeze(1)
                 vel[:, step] = vel_out.squeeze(1)
 
@@ -933,8 +934,9 @@ class PAR_v2_HPP(nn.Module):
         self.block_2_5 = self.get_conv2d_block(cnn_unit, cnn_unit, kernel_size=7)
 
         c3_out = 128
-        
         self.conv_3 = HarmonicDilatedConv(cnn_unit, c3_out, n_per_pitch)
+        self.conv_4 = HarmonicDilatedConv(c3_out, c3_out, n_per_pitch)
+        self.conv_5 = HarmonicDilatedConv(c3_out, c3_out, n_per_pitch)
 
         self.block_4 = self.get_conv2d_block(c3_out, c3_out, pool_size=[1, n_per_pitch], dilation=[1, 12*n_per_pitch])
         self.block_5 = self.get_conv2d_block(c3_out, c3_out, dilation=[1, 12])
@@ -947,6 +949,8 @@ class PAR_v2_HPP(nn.Module):
         x = self.block_2(x)
         x = self.block_2_5(x)
         x = self.conv_3(x)
+        x = self.conv_4(x)
+        x = self.conv_5(x)
         x = self.block_4(x)
         x = x[:,:,:,:88]
         # => [b x 1 x T x 88]
