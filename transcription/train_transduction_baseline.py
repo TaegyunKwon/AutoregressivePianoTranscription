@@ -545,8 +545,7 @@ def train(rank, world_size, config, ddp=True):
                         for key, value in valid_mean.items():
                             if key[-2:] == 'f1' or 'loss' in key or key[-3:] == 'err':
                                 print(f'{key} : {value}')
-                        valid_mean['metric/note/f1_iter0']
-                        model_saver.update(model, optimizer, step, valid_mean['metric/note-with-offsets/f1_iter2'], ddp=ddp)
+                        model_saver.update(model, optimizer, step, valid_mean['metric/note-with-offsets/f1_iter0'], ddp=ddp)
                     if ddp:
                         dist.barrier()
             if step > config.iteration:
