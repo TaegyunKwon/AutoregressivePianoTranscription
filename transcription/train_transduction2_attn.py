@@ -35,6 +35,7 @@ from .data_attn import MAESTRO_V3, MAESTRO, MAPS, EmotionDataset, SMD, ViennaCor
 from .loss import FocalLoss
 from .evaluate import evaluate
 from .utils import summary, CustomSampler
+from .decode import extract_notes
 
 th.autograd.set_detect_anomaly(True)
 os.environ["WANDB_DISABLE_SERVICE"] = "true"
@@ -74,7 +75,7 @@ default_config = dict(
     debug=False,
     seed=1000,
     resume_dir=None,
-    iteration=250000,
+    iteration=500000,
     tf_ratio=0.9,
     port=23456
     
@@ -273,9 +274,9 @@ def valid_step(model, batch, loss_fn, device, config):
     
     frame = th.zeros(shifted_label.shape[0], shifted_label.shape[1]-1, 88, dtype=th.long).to(device)
     vel = th.zeros(shifted_label.shape[0], shifted_label.shape[1]-1, 88, dtype=th.long).to(device)
-    fillin_schedule = [88, 22, 11, 8]
+    fillin_schedule = [88, 22, 11, 8, 4, 1]
     # n_iter = [1, 1, 2, 4]
-    n_iter = [1, 1, 1, 1]
+    n_iter = [1, 1, 1, 1, 1, 1]
     validation_metric = defaultdict(list)
     for n, n_cycle in enumerate(n_iter):
         for cycle in range(n_cycle):
@@ -305,95 +306,222 @@ def valid_step(model, batch, loss_fn, device, config):
            
     return validation_metric, frame, vel
 
+def update_context(last_onset_time, last_onset_vel, frame, vel):
+    #  last_onset_time : 88
+    #  last_onset_vel  : 88
+    #  frame: 88
+    #  vel  : 88
+    
+    onsets = (frame == 2) + (frame == 4)
+    frames = (frame == 2) + (frame == 3) + (frame == 4)
+
+    cur_onset_time = th.zeros_like(last_onset_time)
+    cur_onset_vel = th.zeros_like(last_onset_vel)
+
+    onset_pos = onsets == 1
+    frame_pos = (onsets != 1) * (frames == 1)
+
+    cur_onset_time = onset_pos + frame_pos*(last_onset_time+1)
+    cur_onset_vel = onset_pos*vel + frame_pos*last_onset_vel
+    return cur_onset_time, cur_onset_vel
+
+def make_condition(label, velocity):
+    n_steps = label.shape[0]
+    condition = th.zeros(n_steps, 88, dtype=th.uint8)
+    vel_condition = th.zeros(n_steps, 88, dtype=th.uint8)
+    onsets = (label == 2) + (label == 4)
+
+    condition += onsets
+    
+
+    condition_bw = th.zeros(n_steps, 88, dtype=th.uint8)
+    vel_condition_bw = th.zeros(n_steps, 88, dtype=th.uint8)
+    condition_bw += onsets
+    for n in range(1,4):
+        condition_bw[:-n] = (condition_bw[:-n]==0)*onsets[n:]*(n+1) + (condition_bw[:-n]!=0)*condition_bw[:-n]
+
+    vel_onsets = velocity*onsets
+    vel_condition_bw += vel_onsets
+    for n in range(1,4):
+        vel_condition_bw[:-n] = (vel_condition_bw[:-n]==0)*vel_onsets[n:] + (vel_condition_bw[:-n]!=0)*vel_condition_bw[:-n]
+    return condition_bw, vel_condition_bw
+
+
+def make_bw_condition(label, velocity):
+    n_steps = label.shape[0]
+    condition = th.zeros(n_steps, 88, dtype=th.uint8)
+    vel_condition = th.zeros(n_steps, 88, dtype=th.uint8)
+    onsets = (label == 2) + (label == 4)
+    condition += onsets
+    for n in range(1,4):
+        condition[:-n] = (condition[:-n]==0)*onsets[n:]*(n+1) + (condition[:-n]!=0)*condition[:-n]
+
+    vel_onsets = velocity*onsets
+    vel_condition += vel_onsets
+    for n in range(1,4):
+        vel_condition[:-n] = (vel_condition[:-n]==0)*vel_onsets[n:] + (vel_condition[:-n]!=0)*vel_condition[:-n]
+    return condition, vel_condition
+
 def test_step(model, batch, device):
     audio = batch['audio']
     B = audio.shape[0]
     test_metric = defaultdict(list)
 
     audio_len = audio.shape[1]
-    n_step = (audio_len - 1) // HOP+ 1
-    shape = (audio.shape[0], n_step, 88)
+    T = (audio_len - 1) // HOP+ 1
+    shape = (audio.shape[0], T, 88)
     seg_len = 800
     overlap = 50
-    n_pow = 6
-    steps = pow(2, n_pow)
-    mask_schedule = schedule(steps, 0.8, 1)
+    
+    last_states = th.zeros(B, T, 88, dtype=th.int64)
+    fw = th.zeros(B, T, 88, dtype=th.int64)
+    fw_v = th.zeros(B, T, 88, dtype=th.int64)
+    bw = th.zeros(B, T, 88, dtype=th.int64)
+    bw_v = th.zeros(B, T, 88, dtype=th.int64)
 
-    n_seg = (n_step - overlap) // (seg_len - overlap) + 1
-    frame_out_iter0 = th.zeros(shape, dtype=th.int)
-    frame_out_iter64 = th.zeros(shape, dtype=th.int)
-    vel_out_iter0 = th.zeros(shape, dtype=th.int)
-    vel_out_iter64 = th.zeros(shape, dtype=th.int)
+    n_seg = (T - overlap) // (seg_len - overlap) + 1
+    # fillin_schedule = [88, 22, 11, 8, 4, 1]
+    # n_iter = [1, 1, 1, 1, 1, 1]
+    # fillin_schedule = [88]
+    # n_iter = [1]
+    out_dict = defaultdict()
+    fillin_schedule = [88, 22, 11, 8]
+    n_iter = [1, 1, 1, 1]
 
-    for seg in tqdm(range(n_seg)):
-        start = seg * (seg_len - overlap)
-        end = start + seg_len
-        if end > n_step:
-            audio_seg = audio[:, int(start*512):]
-            audio_len = audio_seg.shape[1]
-            audio_pad = F.pad(audio_seg, (0, seg_len*512 - audio_len))
-            audio_seg = audio_pad.to(device)
-        else:
-            audio_seg = audio[:, int(start*512):int(end*512)].to(device)
-        frame_init, vel_init = model(audio_seg, th.zeros((B, seg_len, 88), dtype=th.int).to(device), 
-                            th.zeros((B, seg_len, 88), dtype=th.int).to(device), 
-                            th.zeros((B, seg_len, 88), dtype=th.int).to(device)
-                            )
-        # sampling step
-        cond_frame = frame_init.detach().argmax(dim=-1)
-        cond_vel = vel_init.detach().argmax(dim=-1)
-        if seg == 0:
-            frame_out_iter0[:, :end-overlap//2] = cond_frame[:, :-overlap//2]
-            vel_out_iter0[:, :end-overlap//2] = cond_vel[:, :-overlap//2]
-        elif seg == n_seg - 1:
-            frame_out_iter0[:, start+overlap//2:] = cond_frame[:, overlap//2:n_step-start]
-            vel_out_iter0[:, start+overlap//2:] = cond_vel[:, overlap//2:n_step-start]
-        else:
-            frame_out_iter0[:, start+overlap//2:end-overlap//2] = cond_frame[:, overlap//2:-overlap//2]
-            vel_out_iter0[:, start+overlap//2:end-overlap//2] = cond_vel[:, overlap//2:-overlap//2]
-        for iter in range(steps):
-            mask = (th.rand(cond_frame.shape[0], cond_frame.shape[1], 88) < mask_schedule[iter]).to(device)
-            cond = cond_frame * mask
-            cond_vel = cond_vel * mask
-            # with th.autocast(device_type='cuda', dtype=th.float16, enabled=True):
-            frame_out, vel_out = model(audio_seg.to(device), cond.to(th.int).to(device), 
-                               cond_vel.to(device), mask.to(th.int).to(device))
+    for n in range(len(fillin_schedule)):
+        out_dict[f'frame_{n}'] = th.zeros(shape, dtype=th.int64)
+        out_dict[f'vel_{n}'] = th.zeros(shape, dtype=th.int64)
 
-            frame_cat = cond_frame * mask + frame_out.argmax(dim=-1).detach() * ~mask
-            vel_cat = cond_vel * mask + vel_out.argmax(dim=-1).detach() * ~mask
-            cond_frame = frame_cat
-            cond_vel = vel_cat
-        if seg == 0:
-            frame_out_iter64[:, :end-overlap//2] = cond_frame[:, :-overlap//2]
-            vel_out_iter64[:, :end-overlap//2] = cond_vel[:, :-overlap//2]
-        elif seg == n_seg - 1:
-            frame_out_iter64[:, start+overlap//2:] = cond_frame[:, overlap//2:n_step-start]
-            vel_out_iter64[:, start+overlap//2:] = cond_vel[:, overlap//2:n_step-start]
-        else:
-            frame_out_iter64[:, start+overlap//2:end-overlap//2] = cond_frame[:, overlap//2:-overlap//2]
-            vel_out_iter64[:, start+overlap//2:end-overlap//2] = cond_vel[:, overlap//2:-overlap//2]
-    out_iter_0 = []
-    out_iter_64 = []
-    vel_out_iter_0 = []
-    vel_out_iter_64 = []
-    for n in range(audio.shape[0]):
-        label = batch['label'][n][1:]
-        vel = batch['velocity'][n][1:]
-        step_len = batch['step_len'][n]
-        out_iter_0.append(frame_out_iter0[n][:step_len])
-        out_iter_64.append(frame_out_iter64[n][:step_len])
-        vel_out_iter_0.append(vel_out_iter0[n][:step_len])
-        vel_out_iter_64.append(vel_out_iter64[n][:step_len])
-        metrics_init = evaluate(frame_out_iter0[n][:step_len], label, 
-                                vel_out_iter0[n][:step_len], vel, band_eval=False)
-        metrics = evaluate(frame_out_iter64[n][:step_len], label, 
-                                vel_out_iter0[n][:step_len], vel, band_eval=False)
-        for k, v in metrics_init.items():
-            test_metric[k + f'_init'].append(v) 
-        for k, v in metrics.items():
-            test_metric[k + f'_iter64'].append(v)
-        
-    return test_metric, out_iter_0, out_iter_64, vel_out_iter_0, vel_out_iter_64
+    # frame_out_iter0 = th.zeros(shape, dtype=th.int64)
+    # vel_out_iter0 = th.zeros(shape, dtype=th.int64)
+
+    for n, n_cycle in enumerate(n_iter):
+        for cycle in range(n_cycle):
+            if n == 0:
+                # init
+                for seg in tqdm(range(n_seg)):
+                    start = seg * (seg_len - overlap)
+                    end = start + seg_len
+                    if end > T:
+                        audio_seg = audio[:, int(start*HOP):]
+                        audio_len = audio_seg.shape[1]
+                        audio_pad = F.pad(audio_seg, (0, seg_len*HOP - audio_len))
+                        audio_seg = audio_pad.to(device)
+                    else:
+                        audio_seg = audio[:, int(start*HOP):int(end*HOP)].to(device)
+                    target_pitch = np.arange(88)
+                    c_mask, mask = make_pitch_mask(th.zeros((B, seg_len, 88), dtype=th.int), 
+                                                th.zeros((B, seg_len, 88), dtype=th.int),
+                                                th.zeros((B, seg_len, 88), dtype=th.int),
+                                                th.zeros((B, seg_len, 88), dtype=th.int),
+                                                th.zeros((B, seg_len, 88), dtype=th.int),
+                                                target_pitch)
+                    frame, vel = model(audio_seg, c_mask.to(device), 
+                                    th.zeros(B, seg_len,88,dtype=th.int64).to(device), 
+                                    th.zeros(B, seg_len,88,dtype=th.int64).to(device), True, None, target_pitch,
+                                    th.zeros((B, 88), dtype=th.int64), fw[:,0], fw_v[:,0], )
+                    frame = frame.detach().cpu()
+                    vel = vel.detach().cpu()
+                    cond_frame = frame
+                    cond_vel = vel
+                    if seg == 0:
+                        out_dict[f'frame_{n}'][:, :end-overlap//2] = cond_frame[:, :-overlap//2]
+                        out_dict[f'vel_{n}'][:, :end-overlap//2] = cond_vel[:, :-overlap//2]
+                    elif seg == n_seg - 1:
+                        out_dict[f'frame_{n}'][:, start+overlap//2:] = cond_frame[:, overlap//2:T-start]
+                        out_dict[f'vel_{n}'][:, start+overlap//2:] = cond_vel[:, overlap//2:T-start]
+                    else:
+                        out_dict[f'frame_{n}'][:, start+overlap//2:end-overlap//2] = cond_frame[:, overlap//2:-overlap//2]
+                        out_dict[f'vel_{n}'][:, start+overlap//2:end-overlap//2] = cond_vel[:, overlap//2:-overlap//2]
+
+            else:
+                # make fw conditions:
+                last_states = out_dict[f'frame_{n-1}']
+                onsets = (last_states == 2) +  (last_states == 4)
+                frames = (last_states == 2) + (last_states==3) + (last_states == 4)
+                fw = th.zeros(B, T, 88, dtype=th.int64)
+                fw_v = th.zeros(B, T, 88, dtype=th.int64)
+                for b in range(B):
+                    p, i, v = extract_notes(onsets[b], frames[b], out_dict[f'vel_{n-1}'][b])
+                    for idx in range(len(p)):
+                        fw[b, i[idx][0]:i[idx][1], p[idx]] = th.arange(1, i[idx][1]-i[idx][0]+1)
+                        fw_v[b, i[idx][0]:i[idx][1], p[idx]] = v[0]
+                # shifting
+                fw = F.pad(fw, (0,0,1,0))
+                fw_v = F.pad(fw_v, (0,0,1,0))
+                last_states = F.pad(last_states, (0,0,1,0))
+                bw = th.zeros(B, T, 88, dtype=th.int64)
+                bw_v = th.zeros(B, T, 88, dtype=th.int64)
+                for b in range(B):
+                    bw_b, bw_v_b = make_bw_condition(out_dict[f'frame_{n-1}'][b], out_dict[f'vel_{n-1}'][b])
+                    bw[b] = bw_b
+                    bw_v[b] = bw_v_b
+
+                n_fillin = fillin_schedule[n]
+                iter_for_cycle = 88 // n_fillin
+                rand_idx = np.arange(88)
+                np.random.shuffle(rand_idx)
+
+                for seg in tqdm(range(n_seg)):
+                    start = seg * (seg_len - overlap)
+                    end = start + seg_len
+                    frame = out_dict[f'frame_{n-1}'][:,start:end].to(device)
+                    vel = out_dict[f'vel_{n-1}'][:,start:end].to(device)
+                    if end > T:
+                        audio_seg = audio[:, int(start*HOP):]
+                        audio_len = audio_seg.shape[1]
+                        audio_pad = F.pad(audio_seg, (0, seg_len*HOP - audio_len))
+                        audio_seg = audio_pad.to(device)
+                        pad_len = end-T
+                        bw = F.pad(bw, (0,0,0,pad_len))
+                        bw_v = F.pad(bw_v, (0,0,0,pad_len))
+                        frame = F.pad(frame, (0,0,0,pad_len))
+                        vel = F.pad(vel, (0,0,0,pad_len))
+                        pad_len = end-(T+1)
+                        fw = F.pad(fw, (0,0,0,pad_len))
+                        fw_v = F.pad(fw_v, (0,0,0,pad_len))
+                        last_states = F.pad(last_states, (0,0,0,pad_len))
+
+                    else:
+                        audio_seg = audio[:, int(start*HOP):int(end*HOP)].to(device)
+                    for m in range(iter_for_cycle):
+                        target_pitch = rand_idx[n_fillin*m:n_fillin*(m+1)]
+                        mask_pitch = list(set(range(88)) - set(target_pitch))
+                        c_mask, mask = make_pitch_mask(last_states[:,start:end],
+                            fw[:,start:end], fw_v[:, start:end], bw[:,start:end], 
+                            bw_v[:,start:end], mask_pitch)
+                        frame, vel = model(audio_seg, c_mask.to(device), 
+                                           frame, 
+                                           vel, 
+                                           True, None, target_pitch,
+                                           frame[:,0],
+                                           fw[:, start].to(device), 
+                                           fw_v[:,start].to(device))
+                        frame = frame.detach()
+                        vel = vel.detach()
+                    if seg == 0:
+                        out_dict[f'frame_{n}'][:, :end-overlap//2] = frame[:, :-overlap//2].cpu()
+                        out_dict[f'vel_{n}'][:, :end-overlap//2] = vel[:, :-overlap//2].cpu()
+                    elif seg == n_seg - 1:
+                        out_dict[f'frame_{n}'][:, start+overlap//2:] = frame[:, overlap//2:T-start].cpu()
+                        out_dict[f'vel_{n}'][:, start+overlap//2:] = vel[:, overlap//2:T-start].cpu()
+                    else:
+                        out_dict[f'frame_{n}'][:, start+overlap//2:end-overlap//2] = frame[:, overlap//2:-overlap//2].cpu()
+                        out_dict[f'vel_{n}'][:, start+overlap//2:end-overlap//2] = vel[:, overlap//2:-overlap//2].cpu()
+            
+        for b in range(B):
+            label = batch['label'][b][1:]
+            vel = batch['velocity'][b][1:]
+            step_len = batch['step_len'][b]
+
+            metrics_init = evaluate(out_dict[f'frame_{n}'][b][:step_len], label, 
+                                    out_dict[f'vel_{n}'][b][:step_len], vel, band_eval=False)
+            for k, v in metrics_init.items():
+                test_metric[k + f'_c{n}'].append(v) 
+                if 'metric/note/f1' in k or 'metric/note-with-offsets/f1' in k:
+                    print(k, ':', f'{v[0]:.4f}')
+            
+    return test_metric, out_dict
 
 class PadCollate:
     def __call__(self, data):
@@ -510,7 +638,7 @@ def train(rank, world_size, config, ddp=True):
                     break
                 if rank ==0: loop.update(1)
                 model.train()
-                cond_ratio = np.random.uniform(0, 0.9)
+                cond_ratio = np.random.uniform(0, 1-1/88)
                     
                 loss = train_step(model, batch, loss_fn, optimizer, scheduler, device, config, cond_ratio)
                 if rank == 0:
@@ -588,6 +716,7 @@ def train(rank, world_size, config, ddp=True):
     test_set = get_dataset(config, ['test'], sample_len=None,
                             random_sample=False, transform=False)
     test_set.sort_by_length()
+    
     batch_size = 2 # 6 for PAR model, 12G RAM (8 blocked by 8G shm size)
     if ddp:
         segments = np.split(np.arange(len(test_set)),
@@ -609,16 +738,20 @@ def train(rank, world_size, config, ddp=True):
     iterator = data_loader_test
     with th.no_grad():
         for batch in iterator:
-            batch_metric, preds_init, preds, preds_vel_init, preds_vel = test_step(model, batch, device)
+            batch_metric, out_dict = test_step(model, batch, device)
             for k, v in batch_metric.items():
                 test_metrics[k].extend(v)
-            for n in range(len(preds)):
-                pred = preds[n].detach().cpu().to(th.int).numpy()
-                pred_init = preds_init[n].detach().cpu().to(th.int).numpy()
-                pred_vel = preds_vel[n].detach().cpu().to(th.int).numpy()
-                pred_vel_init = preds_vel_init[n].detach().cpu().to(th.int).numpy()
+            for n in range(len(out_dict['frame_0'])):
                 np.savez(Path(SAVE_PATH) / (Path(batch['path'][n]).stem + '.npz'), 
-                         pred=pred, pred_init=pred_init, preds_vel=pred_vel, pred_vel_init=pred_vel_init)
+                         pred_init=out_dict['frame_0'][n].to(th.int).numpy(), 
+                         pred_vel_init=out_dict['vel_0'][n].to(th.int).numpy(), 
+                         pred_c1=out_dict['frame_1'][n].to(th.int).numpy(), 
+                         pred_vel_c1=out_dict['vel_1'][n].to(th.int).numpy(), 
+                         pred_c2=out_dict['frame_2'][n].to(th.int).numpy(), 
+                         pred_vel_c2=out_dict['vel_2'][n].to(th.int).numpy(), 
+                         pred_c3=out_dict['frame_3'][n].to(th.int).numpy(), 
+                         pred_vel_c3=out_dict['vel_3'][n].to(th.int).numpy(), 
+                         )
 
     test_mean = defaultdict(list)
     if ddp:
