@@ -8,7 +8,6 @@ from torch import nn
 from torch import Tensor
 from torchaudio import functional as F
 from torchaudio import transforms
-import librosa
 from .constants import HOP, SR
 
 
