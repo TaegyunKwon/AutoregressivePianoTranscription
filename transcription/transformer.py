@@ -94,6 +94,42 @@ class LearnableSpatialPositionEmbedding(nn.Module):
 
         return z
 
+class LearnableSpatialPositionEmbedding1D(nn.Module):
+    def __init__(self, embedSize, gamma = 10.0, dropoutProb = 0.0):
+        super().__init__()
+
+        self.gamma = gamma
+        self.proj = nn.Linear(1, embedSize)
+
+        self.mlp = nn.Sequential(
+                nn.Linear(embedSize, 4*embedSize),
+                nn.GELU(),
+                nn.Dropout(dropoutProb),
+                nn.Linear(4*embedSize, embedSize))
+
+
+        self.dropout = nn.Dropout(dropoutProb)
+        self._reset_parameters()
+
+
+    def _reset_parameters(self):
+        nn.init.normal_(self.proj.weight, std = 1/self.gamma)
+        nn.init.uniform_(self.proj.bias, a = -math.pi, b = math.pi)
+
+    def forward(self, coord):
+        # coord: [N] or [B, N]
+        if coord.dim() == 1:
+            coord = coord.unsqueeze(-1) # [N, 1]
+        elif coord.dim() == 2:
+            coord = coord.unsqueeze(-1) # [B, N, 1]
+        
+        phi = self.proj(coord.float())
+
+        z = torch.cos(phi)/ math.sqrt(phi.shape[-1]/2)
+        z = self.mlp(z)
+
+        return z
+
 
 """
 The customized MHA layer using the approximated attention
@@ -210,27 +246,7 @@ class BasicBlock(nn.Module):
                 size = inputSize,
                 dropoutProb = dropoutProb
                 )
-        self.mhaBlockT = ResBlock(
-                MultiHeadAttentionKernel(
-                    inputSize,
-                    num_heads=num_heads,
-                    fourierSize = fourierSize,
-                    kernel = approxKernels[1],
-                    hiddenFactor = hiddenFactorAttn
-                    ),
-                size = inputSize,
-                dropoutProb = dropoutProb
-                )
-        self.fnnBlockT  = ResBlock(
-                nn.Sequential(
-                    nn.Linear(inputSize, fnnHiddenSize),
-                    nn.GELU(),
-                    nn.Dropout(dropoutProb),
-                    nn.Linear(fnnHiddenSize, inputSize),
-                    ),
-                size = inputSize,
-                dropoutProb = dropoutProb
-                )
+
     def forward(self, x, mem = None, crossAttn = False):
         # x: [B, T, F, C]
 
@@ -247,14 +263,7 @@ class BasicBlock(nn.Module):
         h = self.mhaBlockF(h, mem)
         h = self.fnnBlockF(h)
 
-        # change to [N, F, T, D]
-        h = h.transpose(-3, -2)
-        mem = mem.transpose(-3, -2)
 
-        h = self.mhaBlockT(h, mem)
-        h = self.fnnBlockT(h)
-        
-        h = h.transpose(-3, -2)
 
         outShape = h.shape
         assert inShape == outShape
@@ -271,19 +280,19 @@ class TransformerEncoder(nn.Module):
             hidden_factor_attn = 1,
             dropout = 0.0,
             num_layers= 4,
+            pos_T = False
             ):
         super().__init__()
+        self.pos_T = pos_T
 
-        self.posEmbedBuilderAttnTF = LearnableSpatialPositionEmbedding(
+        self.posEmbedBuilderAttnTF = LearnableSpatialPositionEmbedding1D(
                 in_channels,
-                coordDim = 2,
                 gamma = pos_embed_init_gamma,
                 dropoutProb=dropout)
 
 
-        self.posEmbedBuilderAttnTE = LearnableSpatialPositionEmbedding(
+        self.posEmbedBuilderAttnTE = LearnableSpatialPositionEmbedding1D(
                 in_channels,
-                coordDim = 2,
                 gamma = pos_embed_init_gamma, dropoutProb = dropout)
 
 
@@ -316,15 +325,16 @@ class TransformerEncoder(nn.Module):
 
         ################ transformer encoders
         coord_F = torch.arange(h.shape[-2], device = x.device).float()
-        coord_T = torch.arange(h.shape[-3], device = x.device).float()
         outputIndices =  outputIndices.float()
+        posEmbed = self.posEmbedBuilderAttnTF(coord_F)
+        posEmbedTgt = self.posEmbedBuilderAttnTE(outputIndices)
+        # posEmbed: [F, D] -> [1, 1, F, D]
+        posEmbed = posEmbed.unsqueeze(0).unsqueeze(0)
+        # posEmbedTgt: [P, D] -> [1, 1, P, D]
+        posEmbedTgt = posEmbedTgt.unsqueeze(0).unsqueeze(0)
 
+        posEmbedTgt = posEmbedTgt.repeat(h.shape[0], h.shape[1], 1, 1)
 
-        posEmbed = self.posEmbedBuilderAttnTF(coord_T, coord_F)
-
-        posEmbedTgt = self.posEmbedBuilderAttnTE(coord_T,  outputIndices)
-
-        posEmbedTgt = posEmbedTgt.unsqueeze(0).repeat(h.shape[0], 1,1,1)
 
         h = h + posEmbed
         hTarget = posEmbedTgt

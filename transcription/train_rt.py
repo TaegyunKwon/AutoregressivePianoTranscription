@@ -429,7 +429,7 @@ def train(rank, world_size, config, ddp=True):
                     run.log({"train": dict(frame_loss=loss.mean(), vel_loss=vel_loss.mean())}, step=step)
                 del loss, vel_loss, batch
                 
-                if step % config.valid_interval == 0 or step in [10, 1000, 5000]:
+                if step % config.valid_interval == 0 or step in [1000, 5000]:
                     model.eval()
 
                     validation_metric = defaultdict(list)
