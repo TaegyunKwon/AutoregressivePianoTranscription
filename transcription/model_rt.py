@@ -50,16 +50,18 @@ class ARModel(nn.Module):
             self.lstm = nn.LSTM(config.hidden_per_pitch+self.context_dim, config.lstm_unit, num_layers=2, batch_first=False, bidirectional=False)
             self.output = nn.Linear(config.lstm_unit, 5)
             self.vel_output = nn.Linear(config.lstm_unit, 1)
+            self.time_output = nn.Linear(config.lstm_unit, 2)
 
         else:
             self.lstm = nn.LSTM((config.hidden_per_pitch+self.context_dim)*88, config.lstm_unit, num_layers=2, batch_first=False, bidirectional=False)
             self.output = nn.Linear(config.lstm_unit, 88*5)
             self.vel_output = nn.Linear(config.lstm_unit, 88)
+            self.time_output = nn.Linear(config.lstm_unit, 88*2)
             
     def forward(self, audio, last_states=None, last_onset_time=None, last_onset_vel=None, 
-                init_state=None, init_onset_time=None, init_onset_vel=None, sampling='gt', 
-                max_step=400, random_condition=False, return_softmax=False):
-        if sampling == 'gt':
+                init_state=None, init_onset_time=None, init_onset_vel=None, mode='gt', 
+                max_step=400, random_condition=False, return_softmax=False, label=None):
+        if mode == 'gt':
             batch_size = audio.shape[0]
             conv_out = self.local_forward(audio)  # B x T x hidden x 88
             n_frame = conv_out.shape[1] 
@@ -91,13 +93,16 @@ class ARModel(nn.Module):
             frame_out = frame_out.view(n_frame, batch_size, 88, 5).permute(1, 0, 2, 3) # B x n_frame x 88 x n_class
             vel_out = self.vel_output(lstm_out) # n_frame, B*88 x 1
             vel_out = vel_out.view(n_frame, batch_size, 88).permute(1, 0, 2)  # B x n_frame x 88
+            
+            time_out = self.time_output(lstm_out)
+            time_out = time_out.view(n_frame, batch_size, 88, 2).permute(1, 0, 2, 3)
 
             if return_softmax:
                 frame_out = F.log_softmax(frame_out, dim=-1)
 
-            return frame_out, vel_out
-
-        else:
+            return frame_out, vel_out, time_out
+            
+        elif mode == 'inference':
             batch_size = audio.shape[0]
             audio_len = audio.shape[1]
             step_len = (audio_len - 1) // HOP+ 1
@@ -126,16 +131,22 @@ class ARModel(nn.Module):
                     last_state.view(batch_size, 1, 88)).transpose(2,3)
             frame = th.zeros((batch_size, step_len, 88, 5)).to(device)
             vel = th.zeros((batch_size, step_len, 88)).to(device)
+            time_out = th.zeros((batch_size, step_len, 88, 2)).to(device) # Initialize time_out for the sampling branch
 
             c = context_enc[:,0:1]
             h = None
             offset = 0
 
-            print(f'n_segs:{n_segs}, n_step:{step_len}')
+            if label is not None:
+                adaptive_label = label.clone()
+            else:
+                adaptive_label = None
+
+            # print(f'n_segs:{n_segs}, n_step:{step_len}')
             seg_num = 0
             for step in range(step_len):
                 if step in seg_edges:
-                    print(f'segment: {seg_num}')
+                    # print(f'segment: {seg_num}')
                     seg_num += 1
                     offset = step
                     if step == 0:  # First segment
@@ -158,13 +169,14 @@ class ARModel(nn.Module):
                         audio[:, start: end],
                         unpad_start=unpad_start, unpad_end=unpad_end)
 
-                frame_out, vel_out, h = self.recurrent_step(
+                frame_out, vel_out, time_out_step, h = self.recurrent_step(
                     conv_out[:, step - offset].unsqueeze(1), 
                     c, 
                     h)
                 # frame_out[:, 0, :, [2,4]] *= 0.9  # adjust the probability of 2 and 4
                 frame[:, step] = frame_out.squeeze(1)
                 vel[:, step] = vel_out.squeeze(1)
+                time_out[:, step] = time_out_step.squeeze(1)
 
                 arg_frame = th.argmax(frame_out[:,0], dim=-1)
                 arg_vel = th.clamp(vel_out[:,0] * 128, min=0, max=128)
@@ -183,7 +195,161 @@ class ARModel(nn.Module):
 
             if return_softmax:
                 frame = F.log_softmax(frame, dim=-1)
-            return frame, vel
+
+            return frame, vel, time_out
+
+        elif mode == 'adaptive_train':
+            batch_size = audio.shape[0]
+            audio_len = audio.shape[1]
+            step_len = (audio_len - 1) // HOP+ 1
+            device = audio.device
+ 
+            if init_onset_time == None:
+                init_state = th.zeros((batch_size, 88), dtype=th.int64)
+                init_onset_time = th.zeros((batch_size, 88))
+                init_onset_vel = th.zeros((batch_size, 88))
+            last_state = init_state.to(device)
+            last_onset_time = init_onset_time.to(device)
+            last_onset_vel = init_onset_vel.to(device)
+
+            if self.enhanced_context:
+                context_enc = self.context_net(
+                    last_state.view(batch_size, 1, 88),
+                    last_onset_time.view(batch_size, 1, 88, 1),
+                    last_onset_vel.view(batch_size, 1, 88, 1))
+            else:
+                context_enc = self.context_net(
+                    last_state.view(batch_size, 1, 88)).transpose(2,3)
+            frame = th.zeros((batch_size, step_len, 88, 5)).to(device)
+            vel = th.zeros((batch_size, step_len, 88)).to(device)
+            time_out = th.zeros((batch_size, step_len, 88, 2)).to(device) # Initialize time_out for the sampling branch
+
+            c = context_enc[:,0:1]
+            h = None
+            offset = 0
+
+            if label is not None:
+                adaptive_label = label.clone()
+            else:
+                adaptive_label = None
+            
+            # Define constants for adaptive training
+            MAX_ONSET_FORGOT = 3
+            MAX_OFFSET_FORGOT = 30
+            
+            # Initialize counters for adaptive training
+            # Shape: B x 88
+            missed_onset_count = th.zeros((audio.shape[0], 88), dtype=th.long, device=audio.device, requires_grad=False)
+            missed_offset_count = th.zeros((audio.shape[0], 88), dtype=th.long, device=audio.device, requires_grad=False)
+            missed_onset_type = th.zeros((audio.shape[0], 88), dtype=th.long, device=audio.device, requires_grad=False)
+            conv_out = self.local_forward(audio)
+
+            for step in range(step_len):
+
+                frame_out, vel_out, time_out_step, h = self.recurrent_step(
+                    conv_out[:, step].unsqueeze(1), 
+                    c, 
+                    h)
+                # frame_out[:, 0, :, [2,4]] *= 0.9  # adjust the probability of 2 and 4
+                frame[:, step] = frame_out.squeeze(1)
+                vel[:, step] = vel_out.squeeze(1)
+                time_out[:, step] = time_out_step.squeeze(1)
+
+                arg_frame = th.argmax(frame_out[:,0], dim=-1)
+                arg_vel = th.clamp(vel_out[:,0] * 128, min=0, max=128)
+                cur_onset_time, cur_onset_vel = update_context(last_onset_time, last_onset_vel, arg_frame, arg_vel)
+                last_onset_time = cur_onset_time
+                last_onset_vel = cur_onset_vel 
+                if self.enhanced_context:
+                    context_enc = self.context_net(
+                        arg_frame.view(batch_size, 1, 88).to(audio.device),
+                        last_onset_time.view(batch_size, 1, 88, 1).to(audio.device).div(313),
+                        last_onset_vel.view(batch_size, 1, 88, 1).to(audio.device).div(128))
+                else:
+                    context_enc = self.context_net(
+                        arg_frame.view(batch_size, 1, 88)).transpose(2,3).to(audio.device)
+                c = context_enc
+
+                # Adaptive Label Update
+                # Adaptive Label Update
+                if adaptive_label is not None and step < step_len - 1:
+                    # Current step prediction: arg_frame (B x 88)
+                    # Effective Target for *this* step (what we should have predicted):
+                    # In AR loop, frame[:, step] corresponds to label[:, step+1].
+                    # So current effective target is adaptive_label[:, step+1].
+                    # (Note: adaptive_label initialized from label).
+
+                    eff_target = adaptive_label[:, step + 1]
+                    orig_target = label[:, step + 1] # Original GT for "New Note" detection
+
+                    # Masks
+                    arg_frame_nograd = arg_frame.detach()
+                    pred_onset_2 = (arg_frame_nograd == 2)
+                    pred_onset_4 = (arg_frame_nograd == 4)
+                    pred_any_onset = pred_onset_2 | pred_onset_4
+                    pred_offset_1 = (arg_frame_nograd == 1)
+
+                    is_eff_onset_2 = (eff_target == 2)
+                    is_eff_onset_4 = (eff_target == 4)
+                    is_eff_any_onset = is_eff_onset_2 | is_eff_onset_4
+                    is_eff_offset_1 = (eff_target == 1)
+
+                    # Update Onset Counters
+                    # If predicted, reset.
+                    # Else if required (eff_target is onset), start/continue counting.
+                    # Else if counting (missed previously), continue counting.
+                    
+                    reset_onset_mask = pred_any_onset.detach()
+                    new_miss_onset_mask = (is_eff_any_onset & (~pred_any_onset)).detach()
+                    
+                    # Store type if new miss
+                    missed_onset_type[is_eff_onset_2 & new_miss_onset_mask] = 2
+                    missed_onset_type[is_eff_onset_4 & new_miss_onset_mask] = 4
+                    
+                    # Logic update for counters
+                    # 1. Reset
+                    missed_onset_count[reset_onset_mask] = 0
+                    # 2. Increment for active misses (new or existing)
+                    increment_mask = (~reset_onset_mask) & ( (missed_onset_count > 0) | new_miss_onset_mask )
+                    missed_onset_count[increment_mask] += 1
+                    
+                    # Update Offset Counters
+                    is_real_onset = (orig_target == 2) | (orig_target == 4)
+                    
+                    reset_offset_mask = (pred_offset_1 | is_real_onset).detach()
+                    new_miss_offset_mask = (is_eff_offset_1 & (~pred_offset_1)).detach()
+                    
+                    missed_offset_count[reset_offset_mask] = 0
+                    
+                    increment_offset_mask = (~reset_offset_mask) & ( (missed_offset_count > 0) | new_miss_offset_mask )
+                    missed_offset_count[increment_offset_mask] += 1
+                    
+                    # Apply Enforcement to Next Target (step + 2)
+                    if step + 2 < adaptive_label.shape[1]:
+                        # Force Onset
+                        force_onset_mask = (missed_onset_count > 0) & (missed_onset_count <= MAX_ONSET_FORGOT)
+                        
+                        # Only apply if mask is true
+                        adaptive_label[:, step+2][force_onset_mask] = missed_onset_type[force_onset_mask].detach()
+                        
+                        # Force Offset
+                        force_offset_mask = (missed_offset_count > 0) & (missed_offset_count <= MAX_OFFSET_FORGOT)
+                        adaptive_label[:, step+2][force_offset_mask] = 1
+
+
+            if return_softmax:
+                frame = F.log_softmax(frame, dim=-1)
+            
+            if adaptive_label is not None:
+                # Align adaptive_label return to match frame_out?
+                # frame_out is step_len.
+                # adaptive_label was cloned from label (full length).
+                # We should return the part that matches frame_out target.
+                # frame_out predicts label[:, 1:].
+                # So we return adaptive_label[:, 1:].
+                return frame, vel, time_out, adaptive_label[:, 1:]
+                
+            return frame, vel, time_out
 
     def local_forward(self, audio, unpad_start=False, unpad_end=False):
         if "Mel2" in self.model: 
@@ -239,7 +405,9 @@ class ARModel(nn.Module):
         vel_out = self.vel_output(lstm_out) # n_frame, B*88 x 1
         vel_out = vel_out.view(n_frame, batch_size, 88).permute(1, 0, 2)  # B x n_frame x 88
 
-        return frame_out, vel_out, lstm_hidden
+        time_out = self.time_output(lstm_out)
+        time_out = time_out.view(n_frame, batch_size, 88, 2).permute(1, 0, 2, 3)
+        return frame_out, vel_out, time_out, lstm_hidden
 
 class SME(nn.Module):
     def __init__(self, config):

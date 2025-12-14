@@ -26,7 +26,7 @@ def uniform_augmentation(arr, width, prob):
     idx = [el[perm] for el in idx]
     rand_arr = th.rand((n_change,))
     out_tensor = arr.clone()
-    out_tensor[idx] = out_tensor[idx]*(1+(rand_arr*2-1)*width)
+    out_tensor[tuple(idx)] = out_tensor[tuple(idx)]*(1+(rand_arr*2-1)*width)
     return out_tensor
 
 def onset_time_transform(arr, std, prob, zero_prob):
@@ -64,6 +64,7 @@ class PianoSampleDataset(Dataset):
         self.delay = delay
         self.random = np.random.RandomState(seed)
         self.transform = transform
+        self.augmentator = None # Will be set by set_augmentator
 
         self.n_keys = MAX_MIDI - MIN_MIDI + 1
         self.data_path = []
@@ -75,7 +76,7 @@ class PianoSampleDataset(Dataset):
         
         # outputs
         self.frame_features = ['label', 'pedal_label', 'velocity', 
-                               'last_onset_time', 'last_onset_vel']
+                               'last_onset_time', 'last_onset_vel', 'onset_shift', 'offset_shift']
         # aggregate files in all groups
         if load_mode == 'ram':
             self.data = []
@@ -96,6 +97,7 @@ class PianoSampleDataset(Dataset):
         '''
 
         audio_path = self.data_path[index][0]
+        tsv_path = self.data_path[index][1]
         result = dict(path=audio_path)
         def th_load_from_memmap(path, dtype, offset=None, shape=None, cast_type=None):
             if cast_type is not None:
@@ -107,7 +109,7 @@ class PianoSampleDataset(Dataset):
             return tensor
             
     
-        meta = th.load(audio_path.replace('.flac', '_meta.pt'))
+        meta = th.load(tsv_path.replace('.tsv', '_meta.pt'))
         total_audio_length, total_steps = meta['audio_length'], meta['n_steps']
 
         if self.sample_length is not None:  # fixed length segmentation
@@ -122,7 +124,7 @@ class PianoSampleDataset(Dataset):
             end = begin + self.sample_length
 
             result['audio'] = th_load_from_memmap(
-                audio_path.replace('.flac', '_audio.npy'), 'int16', 
+                tsv_path.replace('.tsv', '_audio.npy'), 'int16', 
                 begin*np.dtype(np.int16).itemsize, self.sample_length, np.float32)
 
             for el in self.frame_features:
@@ -136,24 +138,27 @@ class PianoSampleDataset(Dataset):
                         save_dtype = np.uint16
                     else:
                         save_dtype = np.uint8
+                elif 'shift' in el:
+                    cast_type = np.float32
+                    save_dtype = np.float32
                 else:
                     cast_type = np.int64
                     save_dtype = np.uint8
                 if step_begin > self.delay - 1:
                     result[el] = th_load_from_memmap(
-                        audio_path.replace('.flac', '_{}.npy'.format(el)), save_dtype,
+                        tsv_path.replace('.tsv', '_{}.npy'.format(el)), save_dtype,
                         (step_begin-self.delay)*n_feature*np.dtype(save_dtype).itemsize, (n_steps+1, n_feature), cast_type)
                 else:  # if no previous frames exist
                     result[el] = F.pad(
                         th_load_from_memmap(
-                            audio_path.replace('.flac', '_{}.npy'.format(el)), save_dtype,
+                            tsv_path.replace('.tsv', '_{}.npy'.format(el)), save_dtype,
                             step_begin*n_feature*np.dtype(save_dtype).itemsize, (n_steps, n_feature), cast_type),
                        (0,0,self.delay,0))
             result['time'] = begin / SR 
 
         else: # use whole sequence at ones; padding
             audio = th_load_from_memmap(
-                audio_path.replace('.flac', '_audio.npy'), 'int16', 0, total_audio_length, cast_type=np.float32)
+                tsv_path.replace('.tsv', '_audio.npy'), 'int16', 0, total_audio_length, cast_type=np.float32)
             pad_len = math.ceil(total_audio_length / HOP) * HOP - total_audio_length
             result['audio'] = F.pad(audio, (0, pad_len))
             for el in self.frame_features:
@@ -172,11 +177,14 @@ class PianoSampleDataset(Dataset):
                     save_dtype = np.uint8
                 result[el] = F.pad(
                     th_load_from_memmap(
-                        audio_path.replace('.flac', '_{}.npy'.format(el)), save_dtype, 0,
+                        tsv_path.replace('.tsv', '_{}.npy'.format(el)), save_dtype, 0,
                         (total_steps, n_feature), cast_type),
                 (0,0,self.delay,0))
 
         result['audio'] = result['audio'].float().div_(32768.0)
+        
+        if self.augmentator is not None:
+            result['audio'] = th.from_numpy(self.augmentator(result['audio'].numpy()))
 
         # make 'last onset features'
         frame_mask = result['label'] > 0
@@ -202,8 +210,8 @@ class PianoSampleDataset(Dataset):
     def sort_by_length(self):
         step_lens = []
         for n in range(len(self)):
-            audio_path = self.data_path[n][0]
-            meta_path = audio_path.replace('.flac', '_meta.pt')
+            tsv_path = self.data_path[n][1]
+            meta_path = tsv_path.replace('.tsv', '_meta.pt')
             step_len = th.load(meta_path)['n_steps']
             step_lens.append(step_len)
         self.data_path = [x for _, x in sorted(zip(step_lens, self.data_path),
@@ -240,7 +248,7 @@ class PianoSampleDataset(Dataset):
         # saved_data_path = audio_path.replace('.flac', '_parsed.pt').replace('.wav', '_parsed.pt')
         # if Path(saved_data_path).exists():
         #     return 
-        meta_path = audio_path.replace('.flac', '_meta.pt')
+        meta_path = tsv_path.replace('.tsv', '_meta.pt')
         if Path(meta_path).exists():
             return 
 
@@ -263,6 +271,8 @@ class PianoSampleDataset(Dataset):
         velocity = th.zeros(n_steps, n_keys, dtype=th.uint8)
         last_onset_vel = th.zeros(n_steps, n_keys, dtype=th.uint8)
         last_onset_time = th.zeros(n_steps, n_keys, dtype=th.int32)
+        onset_shift = th.zeros(n_steps, n_keys, dtype=th.float32)
+        offset_shift = th.zeros(n_steps, n_keys, dtype=th.float32)
 
         midi = np.loadtxt(tsv_path, delimiter='\t', skiprows=1)
         last_onset_loc = -th.ones(88, dtype=th.int32)
@@ -272,6 +282,12 @@ class PianoSampleDataset(Dataset):
             left = int(round(onset * SR / HOP))
             onset_right = left + 1
             frame_right = int(round(offset * SR / HOP))
+            
+            # Shift features
+            # [-0.5, 0.5] range relative to frame center
+            onset_shift_val = (onset * SR / HOP) - left
+            offset_shift_val = (offset * SR / HOP) - frame_right
+            
             frame_right = min(n_steps, frame_right)
             offset_right = min(n_steps, frame_right + 1)
 
@@ -297,6 +313,10 @@ class PianoSampleDataset(Dataset):
             label[onset_right:frame_right, f] = 3
             label[frame_right:offset_right, f] = 1
             velocity[left:frame_right, f] = vel
+            if left < n_steps:
+                onset_shift[left, f] = onset_shift_val
+            if frame_right < n_steps:
+                offset_shift[frame_right, f] = offset_shift_val
         
         for f in range(88):
             if last_onset_loc[f] == -1:
@@ -349,6 +369,10 @@ class PianoSampleDataset(Dataset):
                        audio_path.replace('.flac', '_last_onset_time.npy'))
         save_to_memmap(last_onset_vel.numpy(), (n_steps, n_keys), 'uint8',
                        audio_path.replace('.flac', '_last_onset_vel.npy'))
+        save_to_memmap(onset_shift.numpy(), (n_steps, n_keys), 'float32',
+                       audio_path.replace('.flac', '_onset_shift.npy'))
+        save_to_memmap(offset_shift.numpy(), (n_steps, n_keys), 'float32',
+                       audio_path.replace('.flac', '_offset_shift.npy'))
 
 
 class MAESTRO(PianoSampleDataset):
@@ -384,6 +408,99 @@ class MAESTRO(PianoSampleDataset):
                 pass
             result.append((str(audio_path), str(tsv_filename)))
         return result
+
+    def set_augmentator(self, augmentator):
+        self.augmentator = augmentator
+
+
+class MAESTRO_Keyscape(PianoSampleDataset):
+    def __init__(self, path='data/maestro-v3.0.0', keyscape_path='data/maestro_keyscape', meta_file='maestro-v3.0.0.csv', groups=None, sequence_length=None, seed=1, 
+                 random_sample=True, transform=None, load_mode='lazy'):
+        self.meta_file = meta_file
+        self.path = Path(path)
+        self.keyscape_path = Path(keyscape_path)
+        super().__init__(self.path, groups if groups is not None else ['test'], sequence_length, seed, random_sample, transform, load_mode=load_mode)
+
+    @classmethod
+    def available_groups(cls):
+        return ['train', 'validation', 'test', 'debug']
+
+    def files(self, group):
+        metadata = csv.reader(open(self.path / self.meta_file, 'r',))
+        
+        # Mapping MIDI to multiple audio files
+        # Original MAESTRO V3 row: split, year, midi_filename, audio_filename, duration
+        # We need to find matching keyscape files for each MIDI
+        
+        result = []
+        for row in metadata:
+            if row[2] == group:
+                midi_rel_path = row[4]
+                midi_path = self.path / midi_rel_path
+                
+                # Keyscape files structure: data/maestro_keyscape/<year>/<file>
+                # The midis in maestros v3 have "year/filename.midi"
+                
+                # Check original flac
+                # result.append(((self.path / row[5]).with_suffix('.flac'), midi_path))
+                
+                # Check Keyscape variants
+                # Assumes KS files contain the original base name or something similar?
+                # Actually user provided `MAESTRO_Keyscape` directory content shows files like:
+                # 2004/MIDI-Unprocessed_SMF_02_R1_2004_01-05_ORIG_MID--AUDIO_02_R1_2004_05_Track05_wav_KS_001.flac
+                # We need to match these to the MIDIs.
+                # The MIDI name in maestro v3 might be: 2004/MIDI-Unprocessed_SMF_02_R1_2004_01-05_ORIG_MID--AUDIO_02_R1_2004_05_Track05_wav.midi
+                
+                # Strategy: Search in keyscape_path/year for files starting with the stem of midi filename
+                
+                year = row[3]
+                midi_stem = Path(midi_rel_path).stem
+                
+                # The keyscape files seem to have a suffix _KS_XXX.flac
+                # And the base name matches the MIDI stem?
+                # Let's try to verify one match. 
+                # MIDI: 2004/MIDI-Unprocessed_SMF_02_R1_2004_01-05_ORIG_MID--AUDIO_02_R1_2004_05_Track05_wav.midi
+                # KS: 2004/MIDI-Unprocessed_SMF_02_R1_2004_01-05_ORIG_MID--AUDIO_02_R1_2004_05_Track05_wav_KS_001.flac
+                # It matches exactly plus _KS_XXX.
+                
+                ks_year_dir = self.keyscape_path / year
+                if ks_year_dir.exists():
+                    pattern = f"{midi_stem}_KS_*.flac"
+                    ks_files = list(ks_year_dir.glob(pattern))
+                    for ks_audio in ks_files:
+                        if group == 'train':
+                            result.append((str(ks_audio), str(midi_path)))
+                        # Only use original for validation/test to keep metrics comparable? 
+                        # Or generalize validation too? User asked to generalize timbre, usually implies training.
+                        # Detailed instruction: "generate multiple piano timbres... data_loader modification"
+                        # I will add KS files to result.
+                
+                # Also include the original file from MAESTRO V3? 
+                # "additional" suggests we should keep original too.
+                original_audio = (self.path / row[5]).with_suffix('.flac')
+                result.append((str(original_audio), str(midi_path)))
+
+        # Convert MIDIs to TSV if needed (reusing logic)
+        final_result = []
+        for audio_path, midi_path in tqdm(result, desc='Converting midi to tsv group %s' % group, ncols=100):
+            # The TSV should be near the MIDI usually, but if we have multiple audios for one MIDI, 
+            # the TSV is unique per MIDI.
+            # MAESTRO V3 stores TSV next to MIDI?
+            # My current PianoSampleDataset logic expects (audio_path, tsv_path)
+            # And .load() uses tsv_path to generate labels.
+            # Since MIDI is shared, TSV is shared.
+            
+            midi_path = Path(midi_path)
+            tsv_filename = midi_path.with_suffix('.tsv')
+            if not tsv_filename.exists():
+                midi = parse_midi(midi_path)
+                np.savetxt(tsv_filename, midi, fmt='%.6f', delimiter='\t', header='onset,offset,note,velocity')
+                pedal = parse_pedal(midi_path)
+                np.savetxt(tsv_filename.parent / (tsv_filename.stem + '_pedal.tsv'), pedal, fmt='%.6f', delimiter='\t', header='onset,offset,type')
+            
+            final_result.append((str(audio_path), str(tsv_filename)))
+            
+        return final_result
 
 
 class MAESTRO_V3(PianoSampleDataset):

@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-def checkpointByPass(f, *args):
+def checkpointByPass(f, *args, **kwargs):
     return f(*args)
 
 
@@ -342,7 +342,7 @@ class TransformerEncoder(nn.Module):
         hAll = torch.cat( [h, hTarget], dim = -2)
 
         for l in self.encoderLayers:
-            hAll = checkpoint(l, hAll)
+            hAll = checkpoint(l, hAll, use_reentrant=False)
 
         h, hTarget = hAll.split([h.shape[-2], hTarget.shape[-2]], dim = -2)
 

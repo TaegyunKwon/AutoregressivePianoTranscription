@@ -32,9 +32,10 @@ from adabelief_pytorch import AdaBelief
 
 from .model_rt import ARModel
 from .constants import HOP
-from .data import MAESTRO_V3, MAESTRO, MAPS, EmotionDataset, SMD, ViennaCorpus
+from .data import MAESTRO_V3, MAESTRO, MAPS, EmotionDataset, SMD, ViennaCorpus, MAESTRO_Keyscape
 from .loss import FocalLoss
 from .evaluate import evaluate
+from .augment import AugmentatorAudiomentations
 from .utils import summary, CustomSampler
 
 th.autograd.set_detect_anomaly(True)
@@ -94,7 +95,8 @@ default_config = dict(
     iteration=250000,
     port=23456,
     gradClippingQuantile=0.8,  # quantile for adaptive gradient clipping
-    weight_decay=1e-4  # weight decay for optimizer
+    weight_decay=1e-4,  # weight decay for optimizer
+    adaptive_rate=None, # train with adaptive loss every 10 steps
     
     )
    
@@ -111,25 +113,44 @@ def cleanup():
     
 def get_dataset(config, split, sample_len=160256, random_sample=False, transform=False, load_mode='lazy'):
     if config.dataset == 'MAESTRO_V3':
-        return MAESTRO_V3(groups=split, sequence_length=sample_len, 
-                          random_sample=random_sample, transform=transform)
+        Dataset = MAESTRO_V3
+    elif config.dataset == 'MAESTRO_Keyscape':
+        Dataset = MAESTRO_Keyscape
     elif config.dataset == 'MAESTRO_V1':
-        return MAESTRO(groups=split, sequence_length=sample_len, 
-                          random_sample=random_sample, transform=transform)
+        Dataset = MAESTRO
     elif config.dataset == 'MAPS':
-        return MAPS(groups=split, sequence_length=sample_len, 
-                          random_sample=random_sample, transform=transform)
+        Dataset = MAPS
     elif config.dataset == 'Emotion':
-        return EmotionDataset(groups=split, sequence_length=sample_len, 
-                          random_sample=random_sample, transform=transform)
+        Dataset = EmotionDataset
     elif config.dataset == 'SMD':
-        return SMD(groups=split, sequence_length=sample_len, 
-                          random_sample=random_sample, transform=transform)
+        Dataset = SMD
     elif config.dataset == 'Vienna':
-        return ViennaCorpus(groups=split, sequence_length=sample_len, 
-                          random_sample=random_sample, transform=transform)
+        Dataset = ViennaCorpus
     else:
         raise KeyError
+    
+    dataset = Dataset(groups=split, sequence_length=sample_len, 
+                      random_sample=random_sample, transform=transform)
+
+    if transform:
+        # Check config for augmentation paths, default to None (augmentator handles generic defaults or None)
+        noise_folder = getattr(config, 'noise_folder', None)
+        ir_folder = getattr(config, 'ir_folder', None)
+        
+        # Fallback to default paths if not in config
+        if noise_folder is None and os.path.exists('data/noises'):
+            noise_folder = 'data/noises'
+        if ir_folder is None and os.path.exists('data/impulse_responses'):
+            ir_folder = 'data/impulse_responses'
+        
+        augmentator = AugmentatorAudiomentations(sampleRate=16000, 
+                                                 noiseFolder=noise_folder, 
+                                                 convIRFolder=ir_folder)
+        # Verify dataset supports set_augmentator (PianoSampleDataset does)
+        if hasattr(dataset, 'set_augmentator'):
+            dataset.set_augmentator(augmentator)
+
+    return dataset
 
 class ModelSaver():
     def __init__(self, config, order='lower', n_keep=3, resume=False):
@@ -216,6 +237,7 @@ class Losses(nn.Module):
         super().__init__()
         self.frame_loss_fn = FocalLoss(alpha=1.0, gamma=2.0) # In: B x C x *
         self.vel_loss_fn = nn.MSELoss(reduction='none') # In: B x *
+        self.time_loss_fn = nn.MSELoss(reduction='none')
 
     def forward(self, logit, vel, label, vel_label):
         frame_loss = self.frame_loss_fn(logit.permute(0, 3, 1, 2), label)
@@ -225,7 +247,7 @@ class Losses(nn.Module):
         return frame_loss, vel_loss
     
 
-def train_step(model, batch, loss_fn, optimizer, scheduler, device, config, gradNormHist=None, gradClippingQuantile=0.8):
+def train_step(model, batch, loss_fn, optimizer, scheduler, device, config, gradNormHist=None, gradClippingQuantile=0.8, mode='gt'):
     for param in model.parameters():
         param.grad = None
     audio = batch['audio'].to(device)
@@ -233,12 +255,50 @@ def train_step(model, batch, loss_fn, optimizer, scheduler, device, config, grad
     shifted_vel = batch['velocity'].to(device)
     last_onset_time = batch['last_onset_time'].to(device)
     last_onset_vel = batch['last_onset_vel'].to(device)
-    frame_out, vel_out = model(audio, shifted_label[:, :-1], 
-                                last_onset_time[:, :-1], last_onset_vel[:, :-1], 
-                                random_condition=config.noisy_condition)
-    # frame out: B x T x 88 x 5
-    loss, vel_loss = loss_fn(frame_out, vel_out, shifted_label[:, 1:], shifted_vel[:, 1:])
-    total_loss = loss.mean() + vel_loss.mean()
+    onset_shift = batch['onset_shift'].to(device).float()
+    offset_shift = batch['offset_shift'].to(device).float()
+    time_shift = th.stack([onset_shift, offset_shift], dim=-1) # B x T x 88 x 2
+
+    if mode == 'gt':
+        frame_out, vel_out, time_out = model(audio, shifted_label[:, :-1],
+                                            last_onset_time=last_onset_time[:, :-1],
+                                            last_onset_vel=last_onset_vel[:, :-1],
+                                            random_condition=config.noisy_condition,
+                                            mode='gt') 
+        loss, vel_loss = loss_fn(frame_out, vel_out, shifted_label[:, 1:], shifted_vel[:, 1:])
+    elif mode == 'adaptive_train':
+        # Use autoregressive mode with adaptive label generation
+        # Pass 'label' for adaptive logic.
+        # Note: 'shifted_label' contains the full sequence including start.
+        frame_out, vel_out, time_out, adaptive_label = model(audio, 
+                                    init_state=None, # will init to zeros
+                                    init_onset_time=None, 
+                                    init_onset_vel=None,
+                                    mode='adaptive_train',
+                                    last_states=None, # Ignored in argmax init usually
+                                    random_condition=config.noisy_condition,
+                                    label=shifted_label)
+        
+        # frame_out: B x T x 88 x 5
+        # adaptive_label: B x T x 88 (aligned with frame_out targets)
+        
+        # Loss calculation using adaptive_label
+        loss, vel_loss = loss_fn(frame_out, vel_out, adaptive_label, shifted_vel[:, 1:])
+    
+    time_loss = th.tensor(0.0, device=device)
+    # Time loss only on event frames (2, 4, 1) in the *target*
+    # target_labels should be the original targets for regression accuracy?
+    # Or adaptive? Probably original is safer ground truth for time shift.
+    target_labels = shifted_label[:, 1:]
+    target_shift = time_shift[:, 1:]
+    
+    event_mask = (target_labels == 2) | (target_labels == 4) | (target_labels == 1)
+    if event_mask.any():
+        # expand mask for last dim (2)
+        # Masking logic
+        loss_t = loss_fn.time_loss_fn(time_out, target_shift) # Returns B x T x 88 x 2
+        time_loss = loss_t[event_mask].mean()
+    total_loss = loss.mean() + vel_loss.mean() + (time_loss * 10.0) 
     optimizer.zero_grad()
     total_loss.mean().backward()
     
@@ -260,11 +320,28 @@ def valid_step(model, batch, loss_fn, device, config):
     audio = batch['audio'].to(device)
     shifted_label = batch['label'].to(device)
     shifted_vel = batch['velocity'].to(device)
+    onset_shift = batch['onset_shift'].to(device).float()
+    offset_shift = batch['offset_shift'].to(device).float()
+    time_shift = th.stack([onset_shift, offset_shift], dim=-1) # B x T x 88 x 2
+
     # 'gt' sampling gives very poor results since some onsets are ignored, as the model doesn't
     # have to make it.
-    frame_out, vel_out = model(audio, last_states=None, random_condition=False, sampling='argmax')
+    frame_out, vel_out, time_out = model(audio, last_states=None, random_condition=False, mode='inference')
     # frame out: B x T x 88 x C
     loss, vel_loss = loss_fn(frame_out, vel_out, shifted_label[:, 1:], shifted_vel[:, 1:])
+    # target_labels should be the original targets for regression accuracy?
+    # Or adaptive? Probably original is safer ground truth for time shift.
+    '''
+    target_labels = shifted_label[:, 1:]
+    target_shift = time_shift[:, 1:]
+    
+    event_mask = (target_labels == 2) | (target_labels == 4) | (target_labels == 1)
+    if event_mask.any():
+        # expand mask for last dim (2)
+        # Masking logic
+        loss_t = loss_fn.time_loss_fn(time_out, target_shift) # Returns B x T x 88 x 2
+        time_loss = loss_t[event_mask]
+    '''
     validation_metric = defaultdict(list)
     for n in range(audio.shape[0]):
         sample = frame_out[n].argmax(dim=-1)
@@ -273,6 +350,8 @@ def valid_step(model, batch, loss_fn, device, config):
             validation_metric[k].append(v)
     validation_metric['frame_loss'] = loss.mean(dim=(1,2))
     validation_metric['vel_loss'] = vel_loss.mean(dim=(1,2))
+    # validation_metric['onset_reg_loss'] = time_loss[:,0]
+    # validation_metric['offset_reg_loss'] = time_loss[:,1]
     
     return validation_metric, frame_out, vel_out
 
@@ -280,7 +359,7 @@ def test_step(model, batch, device):
     audio = batch['audio'].to(device)
     # 'gt' sampling gives very poor results since some onsets are ignored, as the model doesn't
     # have to make it.
-    frame_out, vel_out = model(audio, last_states=None, random_condition=False, sampling='argmax')
+    frame_out, vel_out, _ = model(audio, last_states=None, random_condition=False, mode='inference')
     # frame out: B x T x 88 x C
     frame_outs = [] 
     vel_outs = []
@@ -298,7 +377,7 @@ def test_step(model, batch, device):
             test_metric[k].append(v)
         print(f'{metrics["metric/note/f1"][0]:.4f}, {metrics["metric/note-with-offsets/f1"][0]:.4f}', batch['path'][n])
     
-    return test_metric, frame_outs, vel_outs
+    return test_metric, frame_outs, vel_outs, time_outs
 
 class PadCollate:
     def __call__(self, data):
@@ -424,17 +503,27 @@ def train(rank, world_size, config, ddp=True):
                     break
                 if rank ==0: loop.update(1)
                 model.train()
-                loss, vel_loss= train_step(model, batch, loss_fn, optimizer, scheduler, device, config, gradNormHist, gradClippingQuantile)
+                
+                # Deterministic adaptive schedule
+                # Ensure deterministic across GPUs if step is synced (it is).
+                adaptive_rate = getattr(config, 'adaptive_rate', None)
+                if adaptive_rate is not None:
+                    mode = 'adaptive_train' if step % adaptive_rate == 0 else 'gt'
+                else:
+                    mode = 'gt'
+                
+                loss, vel_loss= train_step(model, batch, loss_fn, optimizer, scheduler, device, config, gradNormHist, gradClippingQuantile, mode=mode)
                 if rank == 0:
                     run.log({"train": dict(frame_loss=loss.mean(), vel_loss=vel_loss.mean())}, step=step)
                 del loss, vel_loss, batch
                 
-                if step % config.valid_interval == 0 or step in [1000, 5000]:
+                if step % config.valid_interval == 0 or step in [1, 5000]:
                     model.eval()
 
                     validation_metric = defaultdict(list)
                     with th.no_grad():
                         for n_valid, batch in enumerate(data_loader_valid):
+                            print(n_valid)
                             batch_metric, _, _ = valid_step(model, batch, loss_fn, device, config)
                             for k, v in batch_metric.items():
                                 validation_metric[k].extend(v)
@@ -522,7 +611,7 @@ def train(rank, world_size, config, ddp=True):
     iterator = data_loader_test
     with th.no_grad():
         for batch in iterator:
-            batch_metric, preds, vel_preds = test_step(model, batch, device)
+            batch_metric, preds, vel_preds, time_preds = test_step(model, batch, device)
             for k, v in batch_metric.items():
                 test_metrics[k].extend(v)
             for n in range(len(preds)):

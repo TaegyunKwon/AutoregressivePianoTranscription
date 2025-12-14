@@ -18,7 +18,7 @@ def random_modification(tensor, change_prob, reonset_prob=0.03, onset_prob=0.05,
         th.tensor([off_prob, onset_prob, offset_prob, sustain_prob, reonset_prob]), 
         n_change, replacement=True).to(tensor.device)
     out_tensor = tensor.clone()
-    out_tensor[idx] = rand_arr
+    out_tensor[tuple(idx)] = rand_arr
     return out_tensor
 
 def update_context(last_onset_time, last_onset_vel, frame, vel, rep_type='base'):
