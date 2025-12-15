@@ -146,9 +146,7 @@ def get_dataset(config, split, sample_len=160256, random_sample=False, transform
         augmentator = AugmentatorAudiomentations(sampleRate=16000, 
                                                  noiseFolder=noise_folder, 
                                                  convIRFolder=ir_folder)
-        # Verify dataset supports set_augmentator (PianoSampleDataset does)
-        if hasattr(dataset, 'set_augmentator'):
-            dataset.set_augmentator(augmentator)
+        dataset.augmentator = augmentator
 
     return dataset
 

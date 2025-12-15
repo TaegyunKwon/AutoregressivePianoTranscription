@@ -123,10 +123,13 @@ class PianoSampleDataset(Dataset):
             begin = step_begin * HOP
             end = begin + self.sample_length
 
+            '''
             result['audio'] = th_load_from_memmap(
                 tsv_path.replace('.tsv', '_audio.npy'), 'int16', 
                 begin*np.dtype(np.int16).itemsize, self.sample_length, np.float32)
-
+            '''
+            result['audio'] = np.memmap(tsv_path.replace('.tsv', '_audio.npy'), dtype='int16', 
+                offset=begin*np.dtype(np.int16).itemsize, shape=self.sample_length, mode='c').astype(np.float32).copy()
             for el in self.frame_features:
                 if el == 'pedal_label':
                     n_feature = 2
@@ -157,8 +160,12 @@ class PianoSampleDataset(Dataset):
             result['time'] = begin / SR 
 
         else: # use whole sequence at ones; padding
+            '''
             audio = th_load_from_memmap(
                 tsv_path.replace('.tsv', '_audio.npy'), 'int16', 0, total_audio_length, cast_type=np.float32)
+            '''
+            audio = np.memmap(tsv_path.replace('.tsv', '_audio.npy'), dtype='int16', 
+                offset=0, shape=total_audio_length, mode='c').astype(np.float32).copy()
             pad_len = math.ceil(total_audio_length / HOP) * HOP - total_audio_length
             result['audio'] = F.pad(audio, (0, pad_len))
             for el in self.frame_features:
@@ -181,10 +188,11 @@ class PianoSampleDataset(Dataset):
                         (total_steps, n_feature), cast_type),
                 (0,0,self.delay,0))
 
-        result['audio'] = result['audio'].float().div_(32768.0)
+        result['audio'] = result['audio'].astype(np.float32)/32768.0
         
         if self.augmentator is not None:
-            result['audio'] = th.from_numpy(self.augmentator(result['audio'].numpy()))
+            result['audio'] = self.augmentator(result['audio'])
+        result['audio'] =th.from_numpy(result['audio'])
 
         # make 'last onset features'
         frame_mask = result['label'] > 0
@@ -231,7 +239,7 @@ class PianoSampleDataset(Dataset):
     def files(self, group):
         """return the list of input files (audio_filename, tsv_filename) for this group"""
         raise NotImplementedError
-
+        
     def initialize(self):
         for input_pair in tqdm(self.data_path, desc='initialize files:', ncols=100):
             self.load(*input_pair) 
@@ -409,8 +417,6 @@ class MAESTRO(PianoSampleDataset):
             result.append((str(audio_path), str(tsv_filename)))
         return result
 
-    def set_augmentator(self, augmentator):
-        self.augmentator = augmentator
 
 
 class MAESTRO_Keyscape(PianoSampleDataset):

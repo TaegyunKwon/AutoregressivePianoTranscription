@@ -65,7 +65,6 @@ class AugmentatorAudiomentations:
 
 
         x = copy.deepcopy(x)
-        x = x.T 
 
         # randomly downmix channels
         if len(x.shape) == 2:
@@ -76,9 +75,6 @@ class AugmentatorAudiomentations:
 
             x = np.matmul(weight, x)
             x = x.astype(np.float32)
-
-        # x = x[:]
-        x = x.squeeze(0)
 
         x = self.transform(x, sample_rate = self.sampleRate)
 
@@ -95,8 +91,5 @@ class AugmentatorAudiomentations:
 
         x = self.transformNoise(x, sample_rate = self.sampleRate)
 
-        x = x[None, :]
-
-        x = x.T
 
         return x
