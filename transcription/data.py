@@ -53,7 +53,7 @@ def vel_transform(arr, var, prob, zero_prob):
 
 class PianoSampleDataset(Dataset):
     def __init__(self, path, groups=None, sample_length=16000*5, seed=1, 
-                 random_sample=True, transform=None, delay=1, load_mode='lazy'):
+                 random_sample=True, augmentator=None, delay=1, load_mode='lazy'):
         self.path = path
         self.groups = groups if groups is not None else self.available_groups()
         self.random_sample = random_sample
@@ -63,8 +63,7 @@ class PianoSampleDataset(Dataset):
             assert sample_length % HOP == 0
         self.delay = delay
         self.random = np.random.RandomState(seed)
-        self.transform = transform
-        self.augmentator = None # Will be set by set_augmentator
+        self.augmentator = augmentator
 
         self.n_keys = MAX_MIDI - MIN_MIDI + 1
         self.data_path = []
@@ -123,13 +122,8 @@ class PianoSampleDataset(Dataset):
             begin = step_begin * HOP
             end = begin + self.sample_length
 
-            '''
-            result['audio'] = th_load_from_memmap(
-                tsv_path.replace('.tsv', '_audio.npy'), 'int16', 
-                begin*np.dtype(np.int16).itemsize, self.sample_length, np.float32)
-            '''
-            result['audio'] = np.memmap(tsv_path.replace('.tsv', '_audio.npy'), dtype='int16', 
-                offset=begin*np.dtype(np.int16).itemsize, shape=self.sample_length, mode='c').astype(np.float32).copy()
+            # read directly from flac
+            result['audio'] = soundfile.read(audio_path, dtype='int16', start=begin, stop=end)[0]
             for el in self.frame_features:
                 if el == 'pedal_label':
                     n_feature = 2
@@ -160,12 +154,7 @@ class PianoSampleDataset(Dataset):
             result['time'] = begin / SR 
 
         else: # use whole sequence at ones; padding
-            '''
-            audio = th_load_from_memmap(
-                tsv_path.replace('.tsv', '_audio.npy'), 'int16', 0, total_audio_length, cast_type=np.float32)
-            '''
-            audio = np.memmap(tsv_path.replace('.tsv', '_audio.npy'), dtype='int16', 
-                offset=0, shape=total_audio_length, mode='c').astype(np.float32).copy()
+            audio = soundfile.read(audio_path, dtype='int16', start=begin, stop=end)[0]
             pad_len = math.ceil(total_audio_length / HOP) * HOP - total_audio_length
             result['audio'] = F.pad(audio, (0, pad_len))
             for el in self.frame_features:
@@ -260,17 +249,10 @@ class PianoSampleDataset(Dataset):
         if Path(meta_path).exists():
             return 
 
-        try:
-            audio, sr = soundfile.read(audio_path, dtype='int16')
-        except:
-            print(audio_path)
+        audio_info = sf.info(audio_path)
+        sr = audio_info.samplerate
         assert sr == SR
-
-        if len(audio.shape) == 2:
-            audio = np.mean(audio, axis=-1)
-
-        audio = th.ShortTensor(audio)
-        audio_length = len(audio)
+        audio_length = audio_info.frames
 
         n_keys = MAX_MIDI - MIN_MIDI + 1
         n_steps = (audio_length - 1) // HOP + 1
@@ -365,8 +347,6 @@ class PianoSampleDataset(Dataset):
             mem[:] = arr[:]
             mem.flush()
             return
-        save_to_memmap(audio.numpy(), (audio_length,), 'int16', 
-                       audio_path.replace('.flac', '_audio.npy'))
         save_to_memmap(label.numpy(), (n_steps, n_keys), 'uint8',
                        audio_path.replace('.flac', '_label.npy'))
         save_to_memmap(pedal_label.numpy(), (n_steps, 2), 'uint8',
