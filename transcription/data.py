@@ -154,9 +154,9 @@ class PianoSampleDataset(Dataset):
             result['time'] = begin / SR 
 
         else: # use whole sequence at ones; padding
-            audio = soundfile.read(audio_path, dtype='int16', start=begin, stop=end)[0]
+            audio = soundfile.read(audio_path, dtype='int16')[0]
             pad_len = math.ceil(total_audio_length / HOP) * HOP - total_audio_length
-            result['audio'] = F.pad(audio, (0, pad_len))
+            result['audio'] = np.pad(audio, (0, pad_len))
             for el in self.frame_features:
                 if el == 'pedal_label':
                     n_feature = 2
@@ -179,7 +179,8 @@ class PianoSampleDataset(Dataset):
 
         result['audio'] = result['audio'].astype(np.float32)/32768.0
         
-        if self.augmentator is not None:
+        if self.augmentator:
+            print('augmenting')
             result['audio'] = self.augmentator(result['audio'])
         result['audio'] =th.from_numpy(result['audio'])
 
@@ -192,9 +193,6 @@ class PianoSampleDataset(Dataset):
 
         last_onset_time = th.clamp(result['last_onset_time'], 0, self.max_last) * frame_mask
         last_onset_vel = result['last_onset_vel'] * frame_mask
-        if self.transform:
-            last_onset_time = uniform_augmentation(last_onset_time, 0.2, 0.3)
-            last_onset_vel = uniform_augmentation(last_onset_vel, 0.2, 0.3)
         
         # result['label'] = result['label'].long()
         # result['pedal_label'] = result['pedal_label'].long()
