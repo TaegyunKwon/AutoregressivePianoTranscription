@@ -16,7 +16,7 @@ from tqdm import tqdm
 from mir_eval.util import hz_to_midi, midi_to_hz
 
 from transcription.constants import HOP, SR, MIN_MIDI
-from transcription.model import ARModel
+from transcription.model_rt_tmp import ARModel
 from transcription.train import get_dataset, PadCollate
 from transcription.decode import extract_notes, notes_to_frames
 from transcription.midi import save_midi
@@ -50,7 +50,7 @@ def transcribe(model, audio_batch, save_name, step_len=None, device='cuda'):
     t_audio = F.pad(t_audio, (0, pad_len)).to(device)
     with th.no_grad():
         frame_out, vel_out = model(t_audio, last_states=None, random_condition=False, 
-                                sampling='argmax', max_step=1000)
+                                mode='inference', max_step=1000)
     out = th.argmax(frame_out[0], dim=-1)
     onset_est = ((out == 2) + (out == 4))
     frame_est = ((out == 2) + (out == 3) + (out == 4))
@@ -64,7 +64,7 @@ def transcribe(model, audio_batch, save_name, step_len=None, device='cuda'):
     return frame_out, vel_out
 
 def load_model(model_path, device):
-    ckp = th.load(model_path, map_location='cpu')
+    ckp = th.load(model_path, map_location='cpu', weights_only=False)
     config = dict()
     for k, v in ckp.items():
         if k != 'model_state_dict':
